@@ -29,7 +29,7 @@ use librefang_runtime::sandbox::{SandboxConfig, WasmSandbox};
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::*;
 use librefang_types::capability::Capability;
-use librefang_types::config::KernelConfig;
+use librefang_types::config::{KernelConfig, OutputFormat};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
 use librefang_types::memory::Memory;
@@ -5700,7 +5700,20 @@ impl KernelHandle for LibreFangKernel {
             librefang_user: None,
         };
 
-        let content = librefang_channels::types::ChannelContent::Text(message.to_string());
+        let formatted = if channel == "wecom" {
+            let output_format = self
+                .config
+                .channels
+                .wecom
+                .as_ref()
+                .and_then(|c| c.overrides.output_format)
+                .unwrap_or(OutputFormat::PlainText);
+            librefang_channels::formatter::format_for_wecom(message, output_format)
+        } else {
+            message.to_string()
+        };
+
+        let content = librefang_channels::types::ChannelContent::Text(formatted);
 
         if let Some(tid) = thread_id {
             adapter

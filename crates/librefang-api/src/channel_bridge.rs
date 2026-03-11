@@ -785,6 +785,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "gotify" => channels.gotify.as_ref().map(|c| c.overrides.clone()),
             "webhook" => channels.webhook.as_ref().map(|c| c.overrides.clone()),
             "linkedin" => channels.linkedin.as_ref().map(|c| c.overrides.clone()),
+            "wecom" => channels.wecom.as_ref().map(|c| c.overrides.clone()),
             _ => None,
         }
     }
