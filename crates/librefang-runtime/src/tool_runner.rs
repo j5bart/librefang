@@ -3603,6 +3603,8 @@ mod tests {
     async fn test_capability_enforcement_aliased_tool_name() {
         // Agent has "file_write" in allowed tools, but LLM calls "fs-write".
         // After normalization, this should pass the capability check.
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(workspace.path().join("output")).expect("create output dir");
         let allowed = vec![
             "file_read".to_string(),
             "file_write".to_string(),
@@ -3612,7 +3614,7 @@ mod tests {
         let result = execute_tool(
             "test-id",
             "fs-write", // LLM-hallucinated alias
-            &serde_json::json!({"path": "/nonexistent/file.txt", "content": "hello"}),
+            &serde_json::json!({"path": "output/file.txt", "content": "hello"}),
             None,
             Some(&allowed),
             None,
@@ -3621,7 +3623,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some(workspace.path()),
             None, // media_engine
             None, // exec_policy
             None, // tts_engine
@@ -3629,13 +3631,12 @@ mod tests {
             None, // process_manager
         )
         .await;
-        // Should NOT be "Permission denied" — it should normalize to file_write
-        // and pass the capability check. It will fail for other reasons (path validation).
         assert!(
-            !result.content.contains("Permission denied"),
+            !result.is_error,
             "fs-write should normalize to file_write and pass capability check, got: {}",
             result.content
         );
+        assert!(workspace.path().join("output/file.txt").exists());
     }
 
     #[tokio::test]
