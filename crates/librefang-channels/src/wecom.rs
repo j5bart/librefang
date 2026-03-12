@@ -150,30 +150,35 @@ fn decode_wecom_post_body(
 ) -> Result<HashMap<String, String>, String> {
     let parsed = parse_wecom_xml_fields(body)?;
 
-    let Some(encrypted_payload) = parsed.get("Encrypt") else {
-        return Ok(parsed);
-    };
+    if let Some(token) = token {
+        let timestamp = params
+            .get("timestamp")
+            .ok_or_else(|| "missing timestamp".to_string())?;
+        let nonce = params
+            .get("nonce")
+            .ok_or_else(|| "missing nonce".to_string())?;
+        let msg_signature = params
+            .get("msg_signature")
+            .ok_or_else(|| "missing msg_signature".to_string())?;
+        let signed_payload = parsed
+            .get("Encrypt")
+            .map(String::as_str)
+            .unwrap_or(body.trim());
 
-    let token = token.ok_or_else(|| "missing WeCom callback token".to_string())?;
-    let timestamp = params
-        .get("timestamp")
-        .ok_or_else(|| "missing timestamp".to_string())?;
-    let nonce = params
-        .get("nonce")
-        .ok_or_else(|| "missing nonce".to_string())?;
-    let msg_signature = params
-        .get("msg_signature")
-        .ok_or_else(|| "missing msg_signature".to_string())?;
-
-    if !is_valid_wecom_signature(token, timestamp, nonce, encrypted_payload, msg_signature) {
-        return Err("invalid WeCom callback signature".to_string());
+        if !is_valid_wecom_signature(token, timestamp, nonce, signed_payload, msg_signature) {
+            return Err("invalid WeCom callback signature".to_string());
+        }
     }
 
-    let aes_key = encoding_aes_key
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| "missing WeCom encoding_aes_key".to_string())?;
-    let decrypted_xml = decode_wecom_payload(aes_key, encrypted_payload)?;
-    parse_wecom_xml_fields(&decrypted_xml)
+    if let Some(encrypted_payload) = parsed.get("Encrypt") {
+        let aes_key = encoding_aes_key
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| "missing WeCom encoding_aes_key".to_string())?;
+        let decrypted_xml = decode_wecom_payload(aes_key, encrypted_payload)?;
+        parse_wecom_xml_fields(&decrypted_xml)
+    } else {
+        Ok(parsed)
+    }
 }
 
 fn wecom_success_response() -> axum::response::Response {
@@ -684,5 +689,30 @@ mod tests {
         assert_eq!(fields.get("MsgType").map(String::as_str), Some("text"));
         assert_eq!(fields.get("Content").map(String::as_str), Some("hello"));
         assert_eq!(fields.get("MsgId").map(String::as_str), Some("123456"));
+    }
+
+    #[test]
+    fn test_plaintext_wecom_callback_requires_valid_signature_when_token_configured() {
+        let body = r#"<xml><FromUserName><![CDATA[user123]]></FromUserName><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[hello]]></Content></xml>"#;
+        let mut params = HashMap::new();
+        params.insert("timestamp".to_string(), "1710000000".to_string());
+        params.insert("nonce".to_string(), "nonce".to_string());
+        params.insert(
+            "msg_signature".to_string(),
+            {
+                let mut parts = ["token", "1710000000", "nonce", body];
+                parts.sort_unstable();
+                let mut hasher = Sha1::new();
+                hasher.update(parts.concat().as_bytes());
+                hex::encode(hasher.finalize())
+            },
+        );
+
+        let fields = decode_wecom_post_body(body, &params, Some("token"), None)
+            .expect("signed plaintext callback should verify");
+        assert_eq!(fields.get("Content").map(String::as_str), Some("hello"));
+
+        params.insert("msg_signature".to_string(), "bad-signature".to_string());
+        assert!(decode_wecom_post_body(body, &params, Some("token"), None).is_err());
     }
 }

@@ -195,14 +195,21 @@ fn strip_task_list_prefix(line: &str) -> String {
 
 fn is_fenced_code_marker(line: &str) -> bool {
     let trimmed = line.trim();
-    let mut chars = trimmed.chars();
-    let Some(marker) = chars.next() else {
+    let Some(marker) = trimmed.chars().next() else {
         return false;
     };
     if marker != '`' && marker != '~' {
         return false;
     }
-    chars.all(|c| c == marker || c.is_ascii_alphanumeric())
+    let fence_len = trimmed.chars().take_while(|c| *c == marker).count();
+    if fence_len < 3 {
+        return false;
+    }
+
+    let rest = trimmed[fence_len..].trim();
+    rest.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '+' | '{' | '}' | '#')
+    })
 }
 
 fn is_setext_heading_underline(line: &str) -> bool {
@@ -466,5 +473,11 @@ mod tests {
             result,
             "Title\n\nquoted text\n\ndone item\ntodo item\n\nlet value = 1;\n\ndocs (https://example.com)"
         );
+    }
+
+    #[test]
+    fn test_single_backtick_line_is_not_treated_as_fenced_code() {
+        let result = markdown_to_wecom_plain("`status`\nnext line");
+        assert_eq!(result, "status\nnext line");
     }
 }
