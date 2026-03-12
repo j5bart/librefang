@@ -23,6 +23,10 @@
   <img src="https://img.shields.io/badge/license-Apache--2.0%20%7C%20MIT-blue?style=flat-square" alt="Apache-2.0 OR MIT" />
   <img src="https://img.shields.io/badge/community-maintained-brightgreen?style=flat-square" alt="Community Maintained" />
   <img src="https://img.shields.io/badge/cli-librefang-informational?style=flat-square" alt="CLI librefang" />
+  <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
+  <img src="https://img.shields.io/github/forks/librefang/librefang?style=flat-square" alt="Forks" />
+  <img src="https://img.shields.io/github/issues-raw/librefang/librefang?style=flat-square" alt="Issues" />
+  <img src="https://img.shields.io/github/v/release/librefang/librefang?style=flat-square" alt="Latest Release" />
 </p>
 
 <p align="center">
@@ -425,6 +429,8 @@ Apache-2.0 OR MIT. Keep the original notices intact when redistributing.
 
 - [GitHub](https://github.com/librefang/librefang)
 - [Website](https://librefang.ai/)
+- [Documentation](https://docs.librefang.ai)
+- [API Reference](docs/api-reference.md)
 - [Contributing Guide](CONTRIBUTING.md)
 - [Governance](GOVERNANCE.md)
 - [Maintainers](MAINTAINERS.md)
