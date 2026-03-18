@@ -202,7 +202,7 @@ enum Commands {
     /// Manage event triggers (list, create, delete) [*].
     #[command(
         subcommand,
-        long_about = "Manage event triggers that fire agents on system events.\n\nTriggers let agents react to lifecycle events, other agents spawning, or\ncustom patterns.\n\nExamples:\n  librefang trigger list                   # List all triggers\n  librefang trigger list --agent-id <ID>   # Filter by agent\n  librefang trigger create <AGENT_ID> '{\"lifecycle\":{}}' --prompt \"Event: {{event}}\"\n  librefang trigger delete <TRIGGER_ID>"
+        long_about = "Manage event triggers that fire agents on system events.\n\nTriggers let agents react to lifecycle events, other agents spawning, or\ncustom patterns.\n\nExamples:\n  librefang trigger list                   # List all triggers\n  librefang trigger list --agent-id <ID>   # Filter by agent\n  librefang trigger create <AGENT_ID> '\"lifecycle\"' --prompt \"Event: {{event}}\"\n  librefang trigger delete <TRIGGER_ID>"
     )]
     Trigger(TriggerCommands),
     /// Migrate from another agent framework to LibreFang.
@@ -934,7 +934,7 @@ enum TriggerCommands {
     },
     /// Create a trigger for an agent.
     #[command(
-        long_about = "Create an event trigger that fires an agent when a matching event occurs.\n\nThe pattern is a JSON object describing what events to match. Use the\n{{event}} placeholder in the prompt template.\n\nExamples:\n  librefang trigger create <AGENT_ID> '{\"lifecycle\":{}}'\n  librefang trigger create <AGENT_ID> '{\"agent_spawned\":{\"name_pattern\":\"*\"}}' \\\n    --prompt \"New agent: {{event}}\" --max-fires 10"
+        long_about = "Create an event trigger that fires an agent when a matching event occurs.\n\nThe pattern is a JSON object describing what events to match. Use the\n{{event}} placeholder in the prompt template.\n\nExamples:\n  librefang trigger create <AGENT_ID> '\"lifecycle\"'\n  librefang trigger create <AGENT_ID> '{\"agent_spawned\":{\"name_pattern\":\"*\"}}' \\\n    --prompt \"New agent: {{event}}\" --max-fires 10"
     )]
     Create {
         /// Agent ID (UUID) that owns the trigger.
@@ -2632,7 +2632,10 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
             return;
         }
 
-        let agents = body.as_array();
+        let agents = body
+            .get("items")
+            .and_then(|v| v.as_array())
+            .or_else(|| body.as_array());
 
         match agents {
             Some(agents) if agents.is_empty() => println!("{}", i18n::t("agent-no-agents")),
@@ -2703,14 +2706,15 @@ fn cmd_agent_chat(config: Option<PathBuf>, agent_id_str: &str) {
 
 fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
     if let Some(base) = find_daemon() {
+        let agent_id = resolve_agent_id(&base, agent_id_str);
         let client = daemon_client();
         let body = daemon_json(
             client
-                .delete(format!("{base}/api/agents/{agent_id_str}"))
+                .delete(format!("{base}/api/agents/{agent_id}"))
                 .send(),
         );
         if body.get("status").is_some() {
-            println!("{}", i18n::t_args("agent-killed", &[("id", agent_id_str)]));
+            println!("{}", i18n::t_args("agent-killed", &[("id", &agent_id)]));
         } else {
             eprintln!(
                 "{}",
@@ -2750,15 +2754,16 @@ fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
     match field {
         "model" => {
             if let Some(base) = find_daemon() {
+                let agent_id = resolve_agent_id(&base, agent_id_str);
                 let client = daemon_client();
                 let body = daemon_json(
                     client
-                        .put(format!("{base}/api/agents/{agent_id_str}/model"))
+                        .put(format!("{base}/api/agents/{agent_id}/model"))
                         .json(&serde_json::json!({"model": value}))
                         .send(),
                 );
                 if body.get("status").is_some() {
-                    println!("Agent {agent_id_str} model set to {value}.");
+                    println!("Agent {agent_id} model set to {value}.");
                 } else {
                     eprintln!(
                         "Failed to set model: {}",
@@ -3910,7 +3915,11 @@ max_retrieve = 10
         match client.get(format!("{base}/api/skills")).send() {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    if let Some(arr) = body.as_array() {
+                    if let Some(arr) = body
+                        .get("skills")
+                        .and_then(|v| v.as_array())
+                        .or_else(|| body.as_array())
+                    {
                         if !json {
                             ui::check_ok(&format!("Skills loaded in daemon: {}", arr.len()));
                         }
@@ -3925,7 +3934,11 @@ max_retrieve = 10
         match client.get(format!("{base}/api/mcp/servers")).send() {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    if let Some(arr) = body.as_array() {
+                    if let Some(arr) = body
+                        .get("configured")
+                        .and_then(|v| v.as_array())
+                        .or_else(|| body.as_array())
+                    {
                         let connected = arr
                             .iter()
                             .filter(|s| {
@@ -4377,13 +4390,14 @@ fn cmd_trigger_list(agent_id: Option<&str>) {
 
 fn cmd_trigger_create(agent_id: &str, pattern_json: &str, prompt: &str, max_fires: u64) {
     let base = require_daemon("trigger create");
+    let agent_id = resolve_agent_id(&base, agent_id);
     let pattern: serde_json::Value = serde_json::from_str(pattern_json).unwrap_or_else(|e| {
         eprintln!("Invalid pattern JSON: {e}");
         eprintln!("Examples:");
-        eprintln!("  '{{\"lifecycle\":{{}}}}'");
+        eprintln!("  '\"lifecycle\"'");
         eprintln!("  '{{\"agent_spawned\":{{\"name_pattern\":\"*\"}}}}'");
-        eprintln!("  '{{\"agent_terminated\":{{}}}}'");
-        eprintln!("  '{{\"all\":{{}}}}'");
+        eprintln!("  '\"agent_terminated\"'");
+        eprintln!("  '\"all\"'");
         std::process::exit(1);
     });
 
@@ -6778,7 +6792,11 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
             );
             return;
         }
-        if let Some(arr) = body.as_array() {
+        if let Some(arr) = body
+            .get("models")
+            .and_then(|v| v.as_array())
+            .or_else(|| body.as_array())
+        {
             if arr.is_empty() {
                 println!("No models found.");
                 return;
@@ -6854,7 +6872,18 @@ fn cmd_models_aliases(json: bool) {
             );
             return;
         }
-        if let Some(obj) = body.as_object() {
+        if let Some(arr) = body.get("aliases").and_then(|v| v.as_array()) {
+            println!("{:<30} RESOLVES TO", "ALIAS");
+            println!("{}", "-".repeat(60));
+            for entry in arr {
+                println!(
+                    "{:<30} {}",
+                    entry["alias"].as_str().unwrap_or("?"),
+                    entry["model_id"].as_str().unwrap_or("?"),
+                );
+            }
+        } else if let Some(obj) = body.as_object() {
+            // Fallback for plain {alias: model_id} format
             println!("{:<30} RESOLVES TO", "ALIAS");
             println!("{}", "-".repeat(60));
             for (alias, target) in obj {
@@ -6896,7 +6925,11 @@ fn cmd_models_providers(json: bool) {
             );
             return;
         }
-        if let Some(arr) = body.as_array() {
+        if let Some(arr) = body
+            .get("providers")
+            .and_then(|v| v.as_array())
+            .or_else(|| body.as_array())
+        {
             println!(
                 "{:<20} {:<12} {:<10} BASE URL",
                 "PROVIDER", "AUTH", "MODELS"
@@ -7050,7 +7083,11 @@ fn cmd_approvals_list(json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.as_array() {
+    if let Some(arr) = body
+        .get("approvals")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No pending approvals.");
             return;
@@ -7110,7 +7147,11 @@ fn cmd_cron_list(json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.as_array() {
+    if let Some(arr) = body
+        .get("jobs")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No scheduled jobs.");
             return;
@@ -7149,6 +7190,7 @@ fn cmd_cron_list(json: bool) {
 
 fn cmd_cron_create(agent: &str, spec: &str, prompt: &str, explicit_name: Option<&str>) {
     let base = require_daemon("cron create");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
 
     // Use explicit name if provided, otherwise derive from agent + prompt
@@ -7256,7 +7298,11 @@ fn cmd_sessions(agent: Option<&str>, json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.as_array() {
+    if let Some(arr) = body
+        .get("sessions")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No sessions found.");
             return;
@@ -7266,10 +7312,19 @@ fn cmd_sessions(agent: Option<&str>, json: bool) {
         for s in arr {
             println!(
                 "{:<38} {:<16} {:<8} {}",
-                s["id"].as_str().unwrap_or("?"),
-                s["agent_name"].as_str().unwrap_or("?"),
+                s["session_id"]
+                    .as_str()
+                    .or_else(|| s["id"].as_str())
+                    .unwrap_or("?"),
+                s["agent_id"]
+                    .as_str()
+                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
+                    .unwrap_or(s["agent_name"].as_str().unwrap_or("?")),
                 s["message_count"].as_u64().unwrap_or(0),
-                s["last_active"].as_str().unwrap_or("?"),
+                s["created_at"]
+                    .as_str()
+                    .or_else(|| s["last_active"].as_str())
+                    .unwrap_or("?"),
             );
         }
     } else {
@@ -7441,7 +7496,11 @@ fn cmd_security_audit(limit: usize, json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.as_array() {
+    if let Some(arr) = body
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No audit entries.");
             return;
@@ -7452,9 +7511,18 @@ fn cmd_security_audit(limit: usize, json: bool) {
             println!(
                 "{:<24} {:<16} {:<12} {}",
                 entry["timestamp"].as_str().unwrap_or("?"),
-                entry["agent_name"].as_str().unwrap_or("?"),
-                entry["event_type"].as_str().unwrap_or("?"),
-                entry["description"].as_str().unwrap_or(""),
+                entry["agent_id"]
+                    .as_str()
+                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
+                    .unwrap_or(entry["agent_name"].as_str().unwrap_or("?")),
+                entry["action"]
+                    .as_str()
+                    .or_else(|| entry["event_type"].as_str())
+                    .unwrap_or("?"),
+                entry["detail"]
+                    .as_str()
+                    .or_else(|| entry["description"].as_str())
+                    .unwrap_or(""),
             );
         }
     } else {
@@ -7482,6 +7550,7 @@ fn cmd_security_verify() {
 
 fn cmd_memory_list(agent: &str, json: bool) {
     let base = require_daemon("memory list");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7495,7 +7564,11 @@ fn cmd_memory_list(agent: &str, json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.as_array() {
+    if let Some(arr) = body
+        .get("kv_pairs")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No memory entries for agent '{agent}'.");
             return;
@@ -7524,6 +7597,7 @@ fn cmd_memory_list(agent: &str, json: bool) {
 
 fn cmd_memory_get(agent: &str, key: &str, json: bool) {
     let base = require_daemon("memory get");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7549,6 +7623,7 @@ fn cmd_memory_get(agent: &str, key: &str, json: bool) {
 
 fn cmd_memory_set(agent: &str, key: &str, value: &str) {
     let base = require_daemon("memory set");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7564,13 +7639,14 @@ fn cmd_memory_set(agent: &str, key: &str, value: &str) {
     } else {
         ui::success(&i18n::t_args(
             "memory-set",
-            &[("key", key), ("agent", agent)],
+            &[("key", key), ("agent", &agent)],
         ));
     }
 }
 
 fn cmd_memory_delete(agent: &str, key: &str) {
     let base = require_daemon("memory delete");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7585,7 +7661,7 @@ fn cmd_memory_delete(agent: &str, key: &str) {
     } else {
         ui::success(&i18n::t_args(
             "memory-deleted",
-            &[("key", key), ("agent", agent)],
+            &[("key", key), ("agent", &agent)],
         ));
     }
 }
@@ -7671,7 +7747,7 @@ fn cmd_devices_remove(id: &str) {
 fn cmd_webhooks_list(json: bool) {
     let base = require_daemon("webhooks list");
     let client = daemon_client();
-    let body = daemon_json(client.get(format!("{base}/api/triggers")).send());
+    let body = daemon_json(client.get(format!("{base}/api/webhooks")).send());
     if json {
         println!(
             "{}",
@@ -7679,18 +7755,27 @@ fn cmd_webhooks_list(json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.as_array() {
+    if let Some(arr) = body
+        .get("webhooks")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No webhooks configured.");
             return;
         }
-        println!("{:<38} {:<16} URL", "ID", "AGENT");
-        println!("{}", "-".repeat(80));
+        println!("{:<38} {:<20} {:<10} URL", "ID", "NAME", "ENABLED");
+        println!("{}", "-".repeat(90));
         for w in arr {
             println!(
-                "{:<38} {:<16} {}",
+                "{:<38} {:<20} {:<10} {}",
                 w["id"].as_str().unwrap_or("?"),
-                w["agent_id"].as_str().unwrap_or("?"),
+                w["name"].as_str().unwrap_or("?"),
+                if w["enabled"].as_bool().unwrap_or(false) {
+                    "yes"
+                } else {
+                    "no"
+                },
                 w["url"].as_str().unwrap_or(""),
             );
         }
@@ -7704,14 +7789,22 @@ fn cmd_webhooks_list(json: bool) {
 
 fn cmd_webhooks_create(agent: &str, url: &str) {
     let base = require_daemon("webhooks create");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
+
+    // Derive a name from the URL hostname
+    let name = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| "webhook".to_string());
+
     let body = daemon_json(
         client
-            .post(format!("{base}/api/triggers"))
+            .post(format!("{base}/api/webhooks"))
             .json(&serde_json::json!({
-                "agent_id": agent,
-                "pattern": {"webhook": {"url": url}},
-                "prompt_template": "Webhook event: {{event}}",
+                "name": format!("{agent}-{name}"),
+                "url": url,
+                "events": ["all"],
             }))
             .send(),
     );
@@ -7728,7 +7821,7 @@ fn cmd_webhooks_create(agent: &str, url: &str) {
 fn cmd_webhooks_delete(id: &str) {
     let base = require_daemon("webhooks delete");
     let client = daemon_client();
-    let body = daemon_json(client.delete(format!("{base}/api/triggers/{id}")).send());
+    let body = daemon_json(client.delete(format!("{base}/api/webhooks/{id}")).send());
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "webhook-delete-failed",
@@ -7742,7 +7835,7 @@ fn cmd_webhooks_delete(id: &str) {
 fn cmd_webhooks_test(id: &str) {
     let base = require_daemon("webhooks test");
     let client = daemon_client();
-    let body = daemon_json(client.post(format!("{base}/api/triggers/{id}/test")).send());
+    let body = daemon_json(client.post(format!("{base}/api/webhooks/{id}/test")).send());
     if body["success"].as_bool().unwrap_or(false) {
         ui::success(&i18n::t_args("webhook-test-ok", &[("id", id)]));
     } else {
@@ -7753,12 +7846,34 @@ fn cmd_webhooks_test(id: &str) {
     }
 }
 
+/// Resolve an agent name-or-id to a UUID by querying the daemon.
+fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
+    if uuid::Uuid::try_parse(name_or_id).is_ok() {
+        return name_or_id.to_string();
+    }
+    let client = daemon_client();
+    let body = daemon_json(client.get(format!("{base}/api/agents")).send());
+    let agents = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array());
+    if let Some(arr) = agents {
+        if let Some(agent) = arr.iter().find(|a| a["name"].as_str() == Some(name_or_id)) {
+            if let Some(id) = agent["id"].as_str() {
+                return id.to_string();
+            }
+        }
+    }
+    name_or_id.to_string()
+}
+
 fn cmd_message(agent: &str, text: &str, json: bool) {
     let base = require_daemon("message");
+    let agent_id = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
-            .post(format!("{base}/api/agents/{agent}/message"))
+            .post(format!("{base}/api/agents/{agent_id}/message"))
             .json(&serde_json::json!({"message": text}))
             .send(),
     );
