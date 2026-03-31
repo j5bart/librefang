@@ -806,6 +806,10 @@ impl BridgeManager {
             self.webhook_routes.push((name, routes));
             stream
         } else {
+            debug!(
+                "Channel {} uses standalone start() (no webhook routes)",
+                adapter.name()
+            );
             adapter.start().await?
         };
         let handle = self.handle.clone();
