@@ -236,7 +236,7 @@ export function AgentsPage() {
                       ) : (
                         <button
                           onClick={() => { setEditingProvider(true); setProviderInput(detailAgent.model.provider || ""); }}
-                          className="font-black text-brand hover:underline cursor-pointer"
+                          className="font-black hover:text-brand transition-colors cursor-pointer"
                           title="Click to edit"
                         >{detailAgent.model.provider || "—"}</button>
                       )}
