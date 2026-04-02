@@ -959,14 +959,14 @@ enum AgentCommands {
         /// Agent ID (UUID).
         agent_id: String,
     },
-    /// Set an agent property (e.g., model).
+    /// Set an agent property (name, description, model, system_prompt).
     #[command(
-        long_about = "Set a property on a running agent.\n\nCurrently supports changing the model.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-sonnet"
+        long_about = "Set a property on a running agent.\n\nSupported fields: name, description, model, system_prompt.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> name \"My Agent\"\n  librefang agent set <ID> description \"A helpful assistant\"\n  librefang agent set <ID> system_prompt \"You are a helpful assistant.\""
     )]
     Set {
         /// Agent ID (UUID).
         agent_id: String,
-        /// Field to set (model).
+        /// Field to set (name, description, model, system_prompt).
         field: String,
         /// New value.
         value: String,
@@ -3237,36 +3237,38 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
     }
 }
 
+const AGENT_SET_FIELDS: &[&str] = &["name", "description", "model", "system_prompt"];
+
 fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
-    match field {
-        "model" => {
-            if let Some(base) = find_daemon() {
-                let agent_id = resolve_agent_id(&base, agent_id_str);
-                let client = daemon_client();
-                let body = daemon_json(
-                    client
-                        .put(format!("{base}/api/agents/{agent_id}/model"))
-                        .json(&serde_json::json!({"model": value}))
-                        .send(),
-                );
-                if body.get("status").is_some() {
-                    println!("Agent {agent_id} model set to {value}.");
-                } else {
-                    eprintln!(
-                        "Failed to set model: {}",
-                        body["error"].as_str().unwrap_or("Unknown error")
-                    );
-                    std::process::exit(1);
-                }
-            } else {
-                eprintln!("No running daemon found. Start one with: librefang start");
-                std::process::exit(1);
-            }
-        }
-        _ => {
-            eprintln!("Unknown field: {field}. Supported fields: model");
+    if !AGENT_SET_FIELDS.contains(&field) {
+        eprintln!(
+            "Unknown field: {field}. Supported fields: {}",
+            AGENT_SET_FIELDS.join(", ")
+        );
+        std::process::exit(1);
+    }
+
+    if let Some(base) = find_daemon() {
+        let agent_id = resolve_agent_id(&base, agent_id_str);
+        let client = daemon_client();
+        let body = daemon_json(
+            client
+                .patch(format!("{base}/api/agents/{agent_id}"))
+                .json(&serde_json::json!({field: value}))
+                .send(),
+        );
+        if body.get("status").is_some() {
+            println!("Agent {agent_id} {field} set to {value}.");
+        } else {
+            eprintln!(
+                "Failed to set {field}: {}",
+                body["error"].as_str().unwrap_or("Unknown error")
+            );
             std::process::exit(1);
         }
+    } else {
+        eprintln!("No running daemon found. Start one with: librefang start");
+        std::process::exit(1);
     }
 }
 
