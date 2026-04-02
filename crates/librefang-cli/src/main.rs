@@ -961,13 +961,13 @@ enum AgentCommands {
     },
     /// Set an agent property (name, description, model, system_prompt).
     #[command(
-        long_about = "Set a property on a running agent.\n\nSupported fields: name, description, model, system_prompt.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> name \"My Agent\"\n  librefang agent set <ID> description \"A helpful assistant\"\n  librefang agent set <ID> system_prompt \"You are a helpful assistant.\""
+        long_about = "Set a property on a running agent.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-code/claude-sonnet\n  librefang agent set <ID> name \"My Agent\"\n  librefang agent set <ID> description \"A helpful assistant\"\n  librefang agent set <ID> system_prompt \"You are a helpful assistant.\""
     )]
     Set {
         /// Agent ID (UUID).
         agent_id: String,
-        /// Field to set (name, description, model, system_prompt).
-        field: String,
+        /// Field to set.
+        field: AgentSetField,
         /// New value.
         value: String,
     },
@@ -3237,17 +3237,28 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
     }
 }
 
-const AGENT_SET_FIELDS: &[&str] = &["name", "description", "model", "system_prompt"];
+#[derive(clap::ValueEnum, Clone)]
+enum AgentSetField {
+    Name,
+    Description,
+    Model,
+    #[value(name = "system_prompt")]
+    SystemPrompt,
+}
 
-fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
-    if !AGENT_SET_FIELDS.contains(&field) {
-        eprintln!(
-            "Unknown field: {field}. Supported fields: {}",
-            AGENT_SET_FIELDS.join(", ")
-        );
-        std::process::exit(1);
+impl AgentSetField {
+    fn as_str(&self) -> &'static str {
+        match self {
+            AgentSetField::Name => "name",
+            AgentSetField::Description => "description",
+            AgentSetField::Model => "model",
+            AgentSetField::SystemPrompt => "system_prompt",
+        }
     }
+}
 
+fn cmd_agent_set(agent_id_str: &str, field: AgentSetField, value: &str) {
+    let field = field.as_str();
     if let Some(base) = find_daemon() {
         let agent_id = resolve_agent_id(&base, agent_id_str);
         let client = daemon_client();
