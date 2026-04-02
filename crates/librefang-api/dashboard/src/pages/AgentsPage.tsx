@@ -218,14 +218,14 @@ export function AgentsPage() {
                             value={providerInput}
                             onChange={e => setProviderInput(e.target.value)}
                             onKeyDown={e => {
-                              if (e.key === "Enter" && providerInput.trim()) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { provider: providerInput.trim() } });
+                              if (e.key === "Enter" && providerInput.trim()) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { provider: providerInput.trim(), model: detailAgent.model.model } });
                               if (e.key === "Escape") { setEditingProvider(false); setProviderInput(""); }
                             }}
                             className="w-32 px-2 py-0.5 rounded bg-main border border-border-subtle text-xs font-mono focus:outline-none focus:border-brand"
                             autoFocus
                           />
                           <button
-                            onClick={() => { if (providerInput.trim()) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { provider: providerInput.trim() } }); }}
+                            onClick={() => { if (providerInput.trim()) patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { provider: providerInput.trim(), model: detailAgent.model.model } }); }}
                             disabled={patchAgentConfigMutation.isPending || !providerInput.trim()}
                             className="p-0.5 rounded hover:bg-success/10 text-success disabled:opacity-50"
                           ><Check className="w-3 h-3" /></button>
