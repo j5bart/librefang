@@ -182,7 +182,7 @@ export function AgentsPage() {
       )}
       {/* Agent Detail Modal */}
       {detailAgent && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => { setDetailAgent(null); setEditingModel(false); setEditingProvider(false); setEditingMaxTokens(false); }}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setDetailAgent(null)}>
           <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[560px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             {/* Modal Header */}
             <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-sm z-10">
@@ -197,7 +197,7 @@ export function AgentsPage() {
                     <p className="text-[10px] text-text-dim font-mono mt-0.5">{truncateId(detailAgent.id, 16)}</p>
                   </div>
                 </div>
-                <button onClick={() => { setDetailAgent(null); setEditingModel(false); setEditingProvider(false); setEditingMaxTokens(false); }} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+                <button onClick={() => setDetailAgent(null)} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
               </div>
             </div>
             <div className="p-6 space-y-5">
