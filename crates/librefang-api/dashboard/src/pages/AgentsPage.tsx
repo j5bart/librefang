@@ -3,7 +3,7 @@ import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
+import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig, setAgentModel, setAgentProvider,
   listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
   createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -33,6 +33,10 @@ export function AgentsPage() {
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingMaxTokens, setEditingMaxTokens] = useState(false);
   const [maxTokensInput, setMaxTokensInput] = useState("");
+  const [editingModel, setEditingModel] = useState(false);
+  const [modelInput, setModelInput] = useState("");
+  const [editingProvider, setEditingProvider] = useState(false);
+  const [providerInput, setProviderInput] = useState("");
   const queryClient = useQueryClient();
   const spawnMutation = useMutation({
     mutationFn: spawnAgent,
@@ -47,9 +51,34 @@ export function AgentsPage() {
       queryClient.invalidateQueries({ queryKey: ["agent-detail", agentId] });
       setEditingMaxTokens(false);
       setMaxTokensInput("");
-      // Refresh detail panel
       if (detailAgent?.id === agentId) {
         getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
+      }
+    },
+  });
+
+  const setAgentModelMutation = useMutation({
+    mutationFn: ({ agentId, model }: { agentId: string; model: string }) =>
+      setAgentModel(agentId, model),
+    onSuccess: (data, { agentId }) => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      setEditingModel(false);
+      setModelInput("");
+      if (detailAgent?.id === agentId) {
+        setDetailAgent((prev: any) => prev ? { ...prev, model: { ...prev.model, model: data.model, provider: data.provider } } : prev);
+      }
+    },
+  });
+
+  const setAgentProviderMutation = useMutation({
+    mutationFn: ({ agentId, provider }: { agentId: string; provider: string }) =>
+      setAgentProvider(agentId, provider),
+    onSuccess: (data, { agentId }) => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      setEditingProvider(false);
+      setProviderInput("");
+      if (detailAgent?.id === agentId) {
+        setDetailAgent((prev: any) => prev ? { ...prev, model: { ...prev.model, provider: data.provider } } : prev);
       }
     },
   });
@@ -179,7 +208,7 @@ export function AgentsPage() {
       )}
       {/* Agent Detail Modal */}
       {detailAgent && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setDetailAgent(null)}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => { setDetailAgent(null); setEditingModel(false); setEditingProvider(false); setEditingMaxTokens(false); }}>
           <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[560px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             {/* Modal Header */}
             <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-sm z-10">
@@ -194,7 +223,7 @@ export function AgentsPage() {
                     <p className="text-[10px] text-text-dim font-mono mt-0.5">{truncateId(detailAgent.id, 16)}</p>
                   </div>
                 </div>
-                <button onClick={() => setDetailAgent(null)} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+                <button onClick={() => { setDetailAgent(null); setEditingModel(false); setEditingProvider(false); setEditingMaxTokens(false); }} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
               </div>
             </div>
             <div className="p-6 space-y-5">
@@ -206,8 +235,70 @@ export function AgentsPage() {
                     {t("agents.model")}
                   </h4>
                   <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 space-y-2.5 text-xs">
-                    <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.provider")}</span><span className="font-black text-brand">{detailAgent.model.provider}</span></div>
-                    <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.model")}</span><span className="font-black">{detailAgent.model.model}</span></div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-text-dim">{t("agents.provider")}</span>
+                      {editingProvider ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            value={providerInput}
+                            onChange={e => setProviderInput(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === "Enter" && providerInput.trim()) setAgentProviderMutation.mutate({ agentId: detailAgent.id, provider: providerInput.trim() });
+                              if (e.key === "Escape") { setEditingProvider(false); setProviderInput(""); }
+                            }}
+                            className="w-32 px-2 py-0.5 rounded bg-main border border-border-subtle text-xs font-mono focus:outline-none focus:border-brand"
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => { if (providerInput.trim()) setAgentProviderMutation.mutate({ agentId: detailAgent.id, provider: providerInput.trim() }); }}
+                            disabled={setAgentProviderMutation.isPending || !providerInput.trim()}
+                            className="p-0.5 rounded hover:bg-success/10 text-success disabled:opacity-50"
+                          ><Check className="w-3 h-3" /></button>
+                          <button onClick={() => { setEditingProvider(false); setProviderInput(""); }} className="p-0.5 rounded hover:bg-main text-text-dim">
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => { setEditingProvider(true); setProviderInput(detailAgent.model.provider || ""); }}
+                          className="font-black text-brand hover:underline cursor-pointer"
+                          title="Click to edit"
+                        >{detailAgent.model.provider || "—"}</button>
+                      )}
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-text-dim">{t("agents.model")}</span>
+                      {editingModel ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            value={modelInput}
+                            onChange={e => setModelInput(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === "Enter" && modelInput.trim()) setAgentModelMutation.mutate({ agentId: detailAgent.id, model: modelInput.trim() });
+                              if (e.key === "Escape") { setEditingModel(false); setModelInput(""); }
+                            }}
+                            className="w-40 px-2 py-0.5 rounded bg-main border border-border-subtle text-xs font-mono focus:outline-none focus:border-brand"
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => { if (modelInput.trim()) setAgentModelMutation.mutate({ agentId: detailAgent.id, model: modelInput.trim() }); }}
+                            disabled={setAgentModelMutation.isPending || !modelInput.trim()}
+                            className="p-0.5 rounded hover:bg-success/10 text-success disabled:opacity-50"
+                          ><Check className="w-3 h-3" /></button>
+                          <button onClick={() => { setEditingModel(false); setModelInput(""); }} className="p-0.5 rounded hover:bg-main text-text-dim">
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => { setEditingModel(true); setModelInput(detailAgent.model.model || ""); }}
+                          className="font-black hover:text-brand transition-colors cursor-pointer"
+                          title="Click to edit"
+                        >{detailAgent.model.model || "—"}</button>
+                      )}
+                    </div>
                     <div className="flex justify-between items-center">
                       <span className="text-text-dim">{t("agents.max_tokens") || "Max Tokens"}</span>
                       {editingMaxTokens ? (

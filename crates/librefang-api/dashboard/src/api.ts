@@ -734,6 +734,14 @@ export async function patchAgentConfig(agentId: string, config: { max_tokens?: n
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 
+export async function setAgentModel(agentId: string, model: string, provider?: string): Promise<{ status: string; model: string; provider: string }> {
+  return put(`/api/agents/${encodeURIComponent(agentId)}/model`, { model, ...(provider ? { provider } : {}) });
+}
+
+export async function setAgentProvider(agentId: string, provider: string): Promise<{ status: string; model: string; provider: string }> {
+  return put(`/api/agents/${encodeURIComponent(agentId)}/provider`, { provider });
+}
+
 export async function listAgents(): Promise<AgentItem[]> {
   const data = await get<PaginatedResponse<AgentItem>>(
     "/api/agents?limit=200&sort=last_active&order=desc"
