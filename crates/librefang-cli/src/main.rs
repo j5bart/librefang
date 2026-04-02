@@ -3257,7 +3257,7 @@ impl AgentSetField {
     }
 }
 
-fn cmd_agent_set(agent_id_str: &str, field: AgentSetField, value: &str) {
+fn cmd_agent_set(agent_id_str: &str, field: &AgentSetField, value: &str) {
     let field = field.as_str();
     if let Some(base) = find_daemon() {
         let agent_id = resolve_agent_id(&base, agent_id_str);
