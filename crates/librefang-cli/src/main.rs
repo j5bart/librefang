@@ -10207,6 +10207,62 @@ input_schema = { type = "object" }
         assert!(matches!(cli.command, Some(Commands::Agent(_))));
     }
 
+
+
+    // --- agent set: CLI parsing ---
+
+    use super::{AgentCommands, AgentSetField};
+
+    #[test]
+    fn test_agent_set_name_parses() {
+        let cli = Cli::parse_from(["librefang", "agent", "set", "abc-123", "name", "My Agent"]);
+        match cli.command {
+            Some(Commands::Agent(AgentCommands::Set { agent_id, field, value })) => {
+                assert_eq!(agent_id, "abc-123");
+                assert!(matches!(field, AgentSetField::Name));
+                assert_eq!(value, "My Agent");
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_agent_set_description_parses() {
+        let cli = Cli::parse_from(["librefang", "agent", "set", "abc-123", "description", "A bot"]);
+        match cli.command {
+            Some(Commands::Agent(AgentCommands::Set { field, .. })) => {
+                assert!(matches!(field, AgentSetField::Description));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_agent_set_model_parses() {
+        let cli = Cli::parse_from(["librefang", "agent", "set", "abc-123", "model", "gpt-4o"]);
+        match cli.command {
+            Some(Commands::Agent(AgentCommands::Set { field, value, .. })) => {
+                assert!(matches!(field, AgentSetField::Model));
+                assert_eq!(value, "gpt-4o");
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_agent_set_system_prompt_parses() {
+        let cli = Cli::parse_from([
+            "librefang", "agent", "set", "abc-123", "system_prompt", "You are helpful.",
+        ]);
+        match cli.command {
+            Some(Commands::Agent(AgentCommands::Set { field, value, .. })) => {
+                assert!(matches!(field, AgentSetField::SystemPrompt));
+                assert_eq!(value, "You are helpful.");
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
     #[test]
     fn test_hand_status_parses() {
         let cli = Cli::parse_from(["librefang", "hand", "status", "researcher"]);
