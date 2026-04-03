@@ -748,7 +748,7 @@ export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
-export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string }): Promise<ApiActionResponse> {
+export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string; temperature?: number }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 
@@ -757,6 +757,16 @@ export async function listAgents(): Promise<AgentItem[]> {
     "/api/agents?limit=200&sort=last_active&order=desc"
   );
   return data.items ?? [];
+}
+
+export interface AgentTemplate {
+  name: string;
+  description: string;
+}
+
+export async function listAgentTemplates(): Promise<AgentTemplate[]> {
+  const data = await get<{ templates: AgentTemplate[] }>("/api/templates");
+  return data.templates ?? [];
 }
 
 export async function loadAgentSession(agentId: string): Promise<AgentSessionResponse> {
