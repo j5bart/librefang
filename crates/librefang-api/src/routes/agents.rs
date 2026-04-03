@@ -1663,6 +1663,7 @@ pub async fn get_agent(
                 "provider": entry.manifest.model.provider,
                 "model": entry.manifest.model.model,
                 "max_tokens": entry.manifest.model.max_tokens,
+                "temperature": entry.manifest.model.temperature,
             },
             "capabilities": {
                 "tools": entry.manifest.capabilities.tools,
@@ -4767,12 +4768,14 @@ mod monitoring_tests {
             clawhub_cache: dashmap::DashMap::new(),
             skillhub_cache: dashmap::DashMap::new(),
             provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
             webhook_store: crate::webhook_store::WebhookStore::load(home_dir.join("webhooks.json")),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             #[cfg(feature = "telemetry")]
             prometheus_handle: None,
             media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
         });
         (state, tmp)
     }

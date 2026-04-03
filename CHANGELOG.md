@@ -5,34 +5,73 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.3] - 2026-04-03
+
+### Added
+
+- Add agent provider and model update support (#1977) (@j5bart)
+- Editable model section in agent detail modal (#1986) (@houko)
+
+### Fixed
+
+- Usage footer not showing cost when tokens are zero (#1975) (@houko)
+- Providers dashboard, auth, test, catalog sync, and CLI ribbon (#1976) (@houko)
+- Update bedrock model count assertion from 8 to 11 (#1980) (@houko)
+- Persist trimmed messages to prevent OOM on reload (#1987) (@houko)
+
+### Maintenance
+
+- Bump hmac from 0.12.1 to 0.13.0 (#1981) (@app/dependabot)
+- Bump toml_edit from 0.22.27 to 0.25.8+spec-1.1.0 (#1982) (@app/dependabot)
+- Bump sha1 from 0.10.6 to 0.11.0 (#1983) (@app/dependabot)
+- Bump zip from 8.4.0 to 8.5.0 (#1984) (@app/dependabot)
+- Bump libc from 0.2.183 to 0.2.184 (#1985) (@app/dependabot)
+
+### Other
+
+- Create intelligent agent pop-up prompt text modification (#1988) (@Jengro777)
+
+
 ## [2026.4.2] - 2026-04-02
 
 ### Added
 
-- Progressive timeout with partial output preservation (#1918) (@f-liva)
-- Write-ahead message journal for crash recovery (#1919) (@f-liva)
-- Hot reload by default in just dev (#1920) (@houko)
-- Replace cron text input with visual schedule picker (#1923) (@houko)
-- Persistent sessions, credential management & hand agent filtering (#1927) (@houko)
-- Redesign settings page and add built-in tools tab to skills (#1929) (@houko)
+- Press 'r' in just dev to git pull and rebuild (#1949) (@houko)
+- Inline session switcher in chat (#1953) (@houko)
+- Dev hotkeys and auto-pull (#1955) (@houko)
 
 ### Fixed
 
-- Always include Mozilla CA roots alongside system certs (#1922) (@houko)
-- Show template steps as nodes when opening workflow template (#1924) (@houko)
-- Treat blank env vars as unconfigured in provider detection (#1931) (@houko)
-- Validate API keys via live HTTP probe (#1932) (@houko)
-- Validate API keys via live HTTP probe on boot (#1933) (@houko)
-- Eliminate daemon startup race in just dev (#1934) (@houko)
-- Preserve newlines in user chat messages (#1935) (@leszek3737)
+- Expose cleanup_orphan_sessions on MemorySubstrate (#1943) (@houko)
+- Skip non-GET requests in service worker cache (#1944) (@houko)
+- Route hand agent workspace to hands/ instead of agents/ (#1945) (@houko)
+- Preserve depends_on when instantiating templates (#1946) (@houko)
+- Add proxy timeout and WebSocket support for dev server (#1947) (@houko)
+- Respect usage_footer config in chat message footer (#1948) (@houko)
+- Git pull from origin/main in dev hotkey (#1950) (@houko)
+- Validate provider keys and model availability on boot (#1951) (@houko)
+- Use fetch+rebase for dev 'r' hotkey (#1952) (@houko)
+- Remove unused binary_clone variable (#1954) (@houko)
+- Match usage_footer values to backend snake_case (#1956) (@houko)
+- Serialize usage_footer with serde instead of Debug format (#1957) (@houko)
+- Point skillhub API to skillhub.tencent.com (#1958) (@houko)
+- Skillhub install via COS direct download (#1959) (@houko)
+- Remove hardcoded default models and add model availability probe (#1960) (@houko)
+- Install FangHub skills from local registry instead of GitHub (#1961) (@houko)
+- Infer provider from model name in fallback resolution (#1962) (@houko)
+- FangHub install and search use local registry (#1963) (@houko)
+- Mark unreachable local providers as unavailable (#1964) (@houko)
+- Assistant agent model not updated when config changes (#1965) (@houko)
+- Test provider should check CLI availability before requiring API key (#1966) (@houko)
+- Local provider status driven by probe, not detect_auth (#1967) (@houko)
+- Filter hand agents from analytics and telemetry (#1968) (@houko)
+- Rename plugin source to plugin marketplace in Chinese locale (#1969) (@houko)
+- Remove install button from plugins page header (#1970) (@houko)
+- Startup health check respects explicit api_key_env config (#1973) (@houko)
 
-### Documentation
+### Changed
 
-- Add Polish translation of README (#1940) (@leszek3737)
-
-### Maintenance
-
-- Skip Cloudflare deploy for fork PRs (#1928) (@houko)
+- Remove bundled system and add per-hand skill install (#1942) (@houko)
 
 
 ## [2026.4.1] - 2026-04-01
