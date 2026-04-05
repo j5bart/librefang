@@ -37,6 +37,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     libicu72 \
     && rm -rf /var/lib/apt/lists/*
+
+# Optionally include extra packages
+# e.g. ADDITIONAL_PACKAGES="curl git"
+ARG ADDITIONAL_PACKAGES=""
+RUN if [ -n "$ADDITIONAL_PACKAGES" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends $ADDITIONAL_PACKAGES \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/packages /opt/librefang/packages
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
