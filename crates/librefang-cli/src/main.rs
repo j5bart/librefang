@@ -10595,8 +10595,6 @@ input_schema = { type = "object" }
         assert!(matches!(cli.command, Some(Commands::Agent(_))));
     }
 
-
-
     // --- agent set: CLI parsing ---
 
     use super::{AgentCommands, AgentSetField};
@@ -10605,7 +10603,11 @@ input_schema = { type = "object" }
     fn test_agent_set_name_parses() {
         let cli = Cli::parse_from(["librefang", "agent", "set", "abc-123", "name", "My Agent"]);
         match cli.command {
-            Some(Commands::Agent(AgentCommands::Set { agent_id, field, value })) => {
+            Some(Commands::Agent(AgentCommands::Set {
+                agent_id,
+                field,
+                value,
+            })) => {
                 assert_eq!(agent_id, "abc-123");
                 assert!(matches!(field, AgentSetField::Name));
                 assert_eq!(value, "My Agent");
@@ -10616,7 +10618,14 @@ input_schema = { type = "object" }
 
     #[test]
     fn test_agent_set_description_parses() {
-        let cli = Cli::parse_from(["librefang", "agent", "set", "abc-123", "description", "A bot"]);
+        let cli = Cli::parse_from([
+            "librefang",
+            "agent",
+            "set",
+            "abc-123",
+            "description",
+            "A bot",
+        ]);
         match cli.command {
             Some(Commands::Agent(AgentCommands::Set { field, .. })) => {
                 assert!(matches!(field, AgentSetField::Description));
@@ -10640,7 +10649,12 @@ input_schema = { type = "object" }
     #[test]
     fn test_agent_set_system_prompt_parses() {
         let cli = Cli::parse_from([
-            "librefang", "agent", "set", "abc-123", "system_prompt", "You are helpful.",
+            "librefang",
+            "agent",
+            "set",
+            "abc-123",
+            "system_prompt",
+            "You are helpful.",
         ]);
         match cli.command {
             Some(Commands::Agent(AgentCommands::Set { field, value, .. })) => {
