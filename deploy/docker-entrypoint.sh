@@ -63,6 +63,30 @@ if [ -n "$PORT" ]; then
   sed -i "s|^api_listen = .*|api_listen = \"0.0.0.0:${PORT}\"|" "$CONFIG"
 fi
 
+# Load [parent_container] section from config.toml as environment variables.
+# List values are space-joined; scalar values are passed as-is.
+# e.g. additional_packages = ["curl", "git"] → ADDITIONAL_PACKAGES="curl git"
+if [ -f "$CONFIG" ]; then
+  eval "$(python3 - "$CONFIG" <<'PYEOF'
+import tomllib, sys, shlex
+with open(sys.argv[1], 'rb') as f:
+    cfg = tomllib.load(f)
+for key, val in cfg.get('parent_container', {}).items():
+    if isinstance(val, list):
+        val = ' '.join(str(v) for v in val)
+    print(f"export {key.upper()}={shlex.quote(str(val))}")
+PYEOF
+  2>/dev/null)"
+fi
+
+# Install additional_packages declared under [parent_container] in config.toml
+# e.g. additional_packages = ["curl", "git"] → ADDITIONAL_PACKAGES="curl git"
+if [ -n "$ADDITIONAL_PACKAGES" ]; then
+  echo "Installing additional packages: $ADDITIONAL_PACKAGES"
+  apt-get update && apt-get install -y --no-install-recommends $ADDITIONAL_PACKAGES \
+    && rm -rf /var/lib/apt/lists/*
+fi
+
 # Auto-sync registry content (agents, hands, skills, providers) on boot
 # Uses HTTP tarball download if git is unavailable
 librefang init 2>/dev/null || true

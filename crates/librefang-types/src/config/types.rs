@@ -1675,6 +1675,17 @@ impl Default for TriggersConfig {
     }
 }
 
+/// Parent Docker/container-specific configuration.
+/// All fields are exported as environment variables in the container entrypoint.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ParentContainerConfig {
+    /// Additional OS packages to install at container startup.
+    /// e.g. `additional_packages = ["curl", "git"]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_packages: Vec<String>,
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1974,6 +1985,9 @@ pub struct KernelConfig {
     /// Individual endpoints may enforce tighter limits.
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// Docker/container-specific configuration.
+    #[serde(default)]
+    pub parent_container: ParentContainerConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -2923,6 +2937,7 @@ impl Default for KernelConfig {
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            parent_container: ParentContainerConfig::default(),
         }
     }
 }
@@ -5343,5 +5358,71 @@ type = "number"
             toml_str, toml_str2,
             "KernelConfig default roundtrip mismatch — a field may be missing from Default impl"
         );
+    }
+
+    // ---- ParentContainerConfig / [parent_container] tests ----
+
+    #[test]
+    fn test_container_config_default_is_empty() {
+        let c = ParentContainerConfig::default();
+        assert!(c.additional_packages.is_empty());
+    }
+
+    #[test]
+    fn test_container_config_deserialize_packages() {
+        let toml_str = r#"
+            additional_packages = ["curl", "git"]
+        "#;
+        let c: ParentContainerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(c.additional_packages, vec!["curl", "git"]);
+    }
+
+    #[test]
+    fn test_container_config_empty_packages() {
+        let toml_str = r#"
+            additional_packages = []
+        "#;
+        let c: ParentContainerConfig = toml::from_str(toml_str).unwrap();
+        assert!(c.additional_packages.is_empty());
+    }
+
+    #[test]
+    fn test_kernel_config_parent_container_section() {
+        let toml_str = r#"
+            [parent_container]
+            additional_packages = ["curl", "git", "jq"]
+        "#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.parent_container.additional_packages,
+            vec!["curl", "git", "jq"]
+        );
+    }
+
+    #[test]
+    fn test_kernel_config_parent_container_absent() {
+        // When the section is omitted entirely, the field should default to empty.
+        let cfg: KernelConfig = toml::from_str("").unwrap();
+        assert!(cfg.parent_container.additional_packages.is_empty());
+    }
+
+    #[test]
+    fn test_container_config_skip_serializing_empty_packages() {
+        // Empty additional_packages should not appear in serialized TOML.
+        let c = ParentContainerConfig::default();
+        let toml_str = toml::to_string(&c).unwrap();
+        assert!(
+            !toml_str.contains("additional_packages"),
+            "empty additional_packages should be omitted from serialized output"
+        );
+    }
+
+    #[test]
+    fn test_container_config_roundtrip() {
+        let toml_str = r#"additional_packages = ["curl", "git"]"#;
+        let c: ParentContainerConfig = toml::from_str(toml_str).unwrap();
+        let out = toml::to_string(&c).unwrap();
+        let c2: ParentContainerConfig = toml::from_str(&out).unwrap();
+        assert_eq!(c.additional_packages, c2.additional_packages);
     }
 }
