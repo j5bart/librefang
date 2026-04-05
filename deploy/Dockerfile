@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Stage 1: Build React dashboard
-FROM node:20-alpine AS dashboard-builder
+FROM node:lts-alpine AS dashboard-builder
 WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
