@@ -1,0 +1,1 @@
+assert call["headers"]["authorization"] == "Bearer test-token"
