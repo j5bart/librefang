@@ -1,0 +1,3 @@
+Field("NEXTCLOUD_TOKEN", "App Password / OAuth Token",
+      "secret", required=True,
+      placeholder="abc123...")
