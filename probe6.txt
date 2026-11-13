@@ -1,0 +1,1 @@
+line1: NEXTCLOUD_ROOMS = "abc123,def456"
