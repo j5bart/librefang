@@ -550,3 +550,115 @@ async def test_watchdog_quiet_when_progress_is_healthy(capsys):
     finally:
         stop.set()
         t.join(timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Send-ack sink (P0 delivery confirmation)
+#
+# `send` was fire-and-forget: the daemon's tool result only proved the
+# pipe write, so a send that died inside the adapter (or never got
+# dispatched) still reported success. When the daemon requests acks
+# (LIBREFANG_SIDECAR_SEND_ACKS) and the adapter declares the
+# `send_acks` capability, the runtime installs a sink the adapter
+# reports delivery outcomes through, and emits send_failed itself when
+# on_command raises for a stamped send.
+# ---------------------------------------------------------------------------
+
+
+class _AckingAdapter(SidecarAdapter):
+    capabilities = ["send_acks"]
+
+    def __init__(self):
+        self.acked = []
+
+    async def on_send(self, cmd):
+        self.acked.append(cmd.id)
+        self.ack_send(cmd.id)
+
+
+async def test_ack_sink_installed_when_requested_and_supported(monkeypatch):
+    monkeypatch.setenv("LIBREFANG_SIDECAR_SEND_ACKS", "1")
+    adapter = _AckingAdapter()
+    emitted = await _drive(adapter, [
+        '{"method":"ready_ack"}',
+        '{"method":"send","params":{"channel_id":"c","text":"hi",'
+        '"id":"cmd-1"}}',
+        '{"method":"shutdown"}',
+    ])
+    assert adapter.acked == ["cmd-1"]
+    assert [e for e in emitted if e["method"] == "send_ack"] == [
+        {"method": "send_ack", "params": {"id": "cmd-1"}},
+    ]
+
+
+async def test_ack_sink_absent_without_env_request(monkeypatch):
+    monkeypatch.delenv("LIBREFANG_SIDECAR_SEND_ACKS", raising=False)
+    adapter = _AckingAdapter()
+    emitted = await _drive(adapter, [
+        '{"method":"ready_ack"}',
+        '{"method":"send","params":{"channel_id":"c","text":"hi",'
+        '"id":"cmd-2"}}',
+        '{"method":"shutdown"}',
+    ])
+    assert adapter.acked == ["cmd-2"]  # ack_send ran, but silently no-oped
+    assert not [e for e in emitted if e["method"] == "send_ack"]
+
+
+async def test_ack_sink_absent_without_capability(monkeypatch):
+    monkeypatch.setenv("LIBREFANG_SIDECAR_SEND_ACKS", "1")
+
+    class NoCapAdapter(_AckingAdapter):
+        capabilities = []  # daemon asked, adapter never opted in
+
+    adapter = NoCapAdapter()
+    emitted = await _drive(adapter, [
+        '{"method":"ready_ack"}',
+        '{"method":"send","params":{"channel_id":"c","text":"hi",'
+        '"id":"cmd-3"}}',
+        '{"method":"shutdown"}',
+    ])
+    assert not [e for e in emitted if e["method"] == "send_ack"]
+
+
+async def test_failed_send_command_emits_send_failed(monkeypatch):
+    monkeypatch.setenv("LIBREFANG_SIDECAR_SEND_ACKS", "1")
+
+    class FailingAdapter(SidecarAdapter):
+        capabilities = ["send_acks"]
+
+        async def on_send(self, cmd):
+            raise RuntimeError("nextcloud 401 — token rejected")
+
+    emitted = await _drive(FailingAdapter(), [
+        '{"method":"ready_ack"}',
+        '{"method":"send","params":{"channel_id":"c","text":"hi",'
+        '"id":"cmd-9"}}',
+        '{"method":"shutdown"}',
+    ])
+    fails = [e for e in emitted if e["method"] == "send_failed"]
+    assert len(fails) == 1
+    assert fails[0]["params"]["id"] == "cmd-9"
+    assert "token rejected" in fails[0]["params"]["error"]
+
+
+async def test_ack_send_with_error_emits_send_failed(monkeypatch):
+    monkeypatch.setenv("LIBREFANG_SIDECAR_SEND_ACKS", "1")
+
+    class MediaFailAdapter(SidecarAdapter):
+        capabilities = ["send_acks"]
+
+        async def on_send(self, cmd):
+            # The adapter handled the failure internally (chat notice
+            # posted) — it still owes the daemon a send_failed.
+            self.ack_send(cmd.id, error="malformed byte array")
+
+    emitted = await _drive(MediaFailAdapter(), [
+        '{"method":"ready_ack"}',
+        '{"method":"send","params":{"channel_id":"c","text":"hi",'
+        '"id":"cmd-4"}}',
+        '{"method":"shutdown"}',
+    ])
+    assert [e for e in emitted if e["method"] == "send_failed"] == [
+        {"method": "send_failed",
+         "params": {"id": "cmd-4", "error": "malformed byte array"}},
+    ]

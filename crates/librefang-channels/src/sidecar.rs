@@ -139,6 +139,10 @@ where
 
 // ── JSON-RPC Protocol Types ────────────────────────────────────────
 
+/// Result relayed to a `send` awaiting its ack: `Ok(())` on
+/// `send_ack`, `Err(reason)` on `send_failed`.
+type SendAckOutcome = Result<(), String>;
+
 /// Messages from the sidecar process TO LibreFang (one JSON per line on stdout).
 #[derive(Debug, Deserialize)]
 #[serde(tag = "method")]
@@ -728,6 +732,9 @@ struct SpawnCtx {
     tx: mpsc::Sender<ChannelMessage>,
     shutdown_rx: watch::Receiver<bool>,
     sup: SupCfg,
+    /// In-flight send-ack waiters — shared with the adapter so the
+    /// stdout reader resolves them on `send_ack`/`send_failed`.
+    pending_acks: Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<SendAckOutcome>>>>,
 }
 
 /// Parse `secrets.env` at `path` into key/value pairs (best-effort).
@@ -1153,6 +1160,12 @@ async fn spawn_once(
     // already inherits it via the default `Command` setup.
     let spawn_env = build_spawn_env(&ctx.home_dir, &ctx.name, &ctx.env).await;
     let mut env_map: HashMap<String, String> = spawn_env.apply.iter().cloned().collect();
+    // Delivery confirmation: request send acks from SDK runtimes that
+    // support them. An operator can set "0" in the channel's env to
+    // restore the fire-and-forget contract.
+    env_map
+        .entry("LIBREFANG_SIDECAR_SEND_ACKS".to_string())
+        .or_insert_with(|| "1".to_string());
     // Embedded-SDK fallback: when the spawn command is a Python
     // interpreter that cannot already `import librefang.sidecar`, put
     // the daemon-bundled copy on PYTHONPATH so a fresh user with just
@@ -1246,6 +1259,7 @@ async fn spawn_once(
     let channel_type = ctx.channel_type.clone();
     let adapter_name = ctx.name.clone();
     let status_clone = ctx.status.clone();
+    let pending_acks_clone = ctx.pending_acks.clone();
     let caps = ctx.caps.clone();
     let reported_account_id_cell = ctx.reported_account_id_cell.clone();
     let reader_stdin = ctx.stdin_tx.clone();
@@ -1566,6 +1580,36 @@ async fn spawn_once(
                                     );
                                     let mut s = lock_std_recover(&status_clone, "status");
                                     s.last_error = Some(params.message);
+                                }
+                                Ok(SidecarEvent::SendAck { params }) => {
+                                    // Resolve the pending waiter; a late
+                                    // ack (after the daemon's timeout
+                                    // already fell back to the receipt)
+                                    // finds no waiter and is dropped.
+                                    if let Some(tx) = pending_acks_clone
+                                        .lock()
+                                        .unwrap()
+                                        .remove(&params.id)
+                                    {
+                                        let _ = tx.send(Ok(()));
+                                    }
+                                }
+                                Ok(SidecarEvent::SendFailed { params }) => {
+                                    warn!(
+                                        adapter = %adapter_name,
+                                        id = %params.id,
+                                        error = %params.error,
+                                        "Sidecar adapter reported send failure"
+                                    );
+                                    let mut s = lock_std_recover(&status_clone, "status");
+                                    s.last_error = Some(params.error.clone());
+                                    if let Some(tx) = pending_acks_clone
+                                        .lock()
+                                        .unwrap()
+                                        .remove(&params.id)
+                                    {
+                                        let _ = tx.send(Err(params.error));
+                                    }
                                 }
                                 Ok(SidecarEvent::QrReady { params }) => {
                                     info!(
@@ -1963,6 +2007,7 @@ impl ChannelAdapter for SidecarAdapter {
             tx: tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
             sup: self.sup,
+            pending_acks: self.pending_acks.clone(),
         };
         let mut shutdown_rx = self.shutdown_rx.clone();
 
@@ -2134,6 +2179,12 @@ impl ChannelAdapter for SidecarAdapter {
             other => serde_json::to_string(other)?,
         };
 
+        // Correlation id stamped on every send. Adapters that declared
+        // `send_acks` echo it in a `send_ack`/`send_failed` event;
+        // older adapters ignore the extra field (additive per the
+        // protocol-version policy).
+        let id = uuid::Uuid::new_v4().to_string();
+
         let cmd = SidecarCommand::Send {
             params: SidecarSendParams {
                 channel_id: user.platform_id.clone(),
@@ -2141,17 +2192,93 @@ impl ChannelAdapter for SidecarAdapter {
                 content: Some(content),
                 thread_id: None,
                 user: user.clone(),
+                id: Some(id),
             },
         };
-        self.send_command(&cmd).await?;
 
-        // Update status
-        {
-            let mut s = lock_std_recover(&self.status, "status");
-            s.messages_sent += 1;
+        // Register the waiter BEFORE the write so a fast ack cannot
+        // race the registration.
+        let ack_rx = if self.has_cap("send_acks") {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.pending_acks.lock().unwrap().insert(id.clone(), tx);
+            Some(rx)
+        } else {
+            None
+        };
+
+        let result = self.send_command(&cmd).await;
+
+        // Delivery confirmation: with the `send_acks` capability the
+        // tool result reflects real delivery — a `send_failed` event
+        // fails the send; a missing ack within the timeout keeps the
+        // pipe-write receipt (WARN, not failure) so slow-but-working
+        // adapters never regress. Without the capability the contract
+        // is unchanged, plus a one-time WARN.
+        let result = match (result, ack_rx) {
+            (Err(e), _) => Err(e),
+            (Ok(()), None) => {
+                if !self
+                    .warned_no_send_acks
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    warn!(
+                        adapter = %self.name,
+                        "sidecar adapter does not support send acks; \
+                         delivery confirmation unavailable, tool results \
+                         reflect the pipe-write receipt only"
+                    );
+                }
+                Ok(())
+            }
+            (Ok(()), Some(rx)) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(self.sup.send_ack_timeout_secs),
+                    rx,
+                )
+                .await
+                {
+                    Ok(Ok(Ok(()))) => Ok(()),
+                    Ok(Ok(Err(reason))) => {
+                        {
+                            let mut s = lock_std_recover(&self.status, "status");
+                            s.last_error = Some(reason.clone());
+                        }
+                        Err(format!("send_failed: {reason}").into())
+                    }
+                    // Waiter dropped without resolving: the reader task
+                    // ended (restart in flight). Fall back to the
+                    // receipt — the supervisor re-establishes the child.
+                    Ok(Err(_lost)) => {
+                        warn!(
+                            adapter = %self.name,
+                            id = %id,
+                            "send-ack waiter dropped (sidecar restarting); \
+                             treating as delivered on the pipe-write receipt"
+                        );
+                        Ok(())
+                    }
+                    Err(_elapsed) => {
+                        warn!(
+                            adapter = %self.name,
+                            id = %id,
+                            timeout_secs = self.sup.send_ack_timeout_secs,
+                            "no send_ack from sidecar adapter; treating as \
+                             delivered on the pipe-write receipt"
+                        );
+                        Ok(())
+                    }
+                }
+            }
+        };
+
+        if result.is_ok() {
+            // Update status
+            {
+                let mut s = lock_std_recover(&self.status, "status");
+                s.messages_sent += 1;
+            }
         }
-
-        Ok(())
+        result
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -4896,5 +5023,188 @@ mod tests {
             }
         }
         None
+    }
+
+    // ── send-ack delivery confirmation (P0) ────────────────────────────
+    //
+    // `send` used to be fire-and-forget: the tool result only proved
+    // the pipe write, so a send that died inside the adapter still
+    // reported success. These drive a real spawned sidecar through
+    // the full ack flow.
+
+    fn ack_script(outcome: &str) -> String {
+        // Emits ready with the `send_acks` capability, then answers
+        // every send with the requested outcome (echoing the
+        // correlation id the daemon stamped on the command).
+        format!(
+            r#"
+import sys, json
+print(json.dumps({{'method': 'ready', 'params': {{
+    'capabilities': ['send_acks'], 'account_id': 'ack-bot'}}}}), flush=True)
+for line in sys.stdin:
+    cmd = json.loads(line)
+    if cmd.get('method') == 'send':
+        cid = cmd.get('params', {{}}).get('id')
+        if {outcome}:
+            print(json.dumps({{'method': 'send_ack',
+                               'params': {{'id': cid}}}}), flush=True)
+        else:
+            print(json.dumps({{'method': 'send_failed', 'params': {{
+                'id': cid, 'error': 'DAV PUT failed: 404'}}}}), flush=True)
+    elif cmd.get('method') == 'shutdown':
+        sys.exit(0)
+"#
+        )
+    }
+
+    fn ack_user() -> crate::types::ChannelUser {
+        crate::types::ChannelUser {
+            platform_id: "r1".to_string(),
+            display_name: "r1".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_failed_event_fails_the_send() {
+        let python = match which_python() {
+            Some(p) => p,
+            None => return,
+        };
+        let config = cfg(
+            "test-ack-fail",
+            &python,
+            vec![
+                "-u".to_string(),
+                "-c".to_string(),
+                ack_script("False"),
+            ],
+        );
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let mut stream = adapter.start().await.unwrap();
+        let result = adapter
+            .send(&ack_user(), ChannelContent::Text("hello".to_string()))
+            .await;
+        let err = result.expect_err("send_failed must fail the send");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("send_failed"),
+            "error must name the send_failed outcome: {msg}"
+        );
+        assert!(
+            msg.contains("DAV PUT failed"),
+            "error must carry the adapter's reason: {msg}"
+        );
+        adapter.stop().await.unwrap();
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn test_send_ack_event_confirms_the_send() {
+        let python = match which_python() {
+            Some(p) => p,
+            None => return,
+        };
+        let config = cfg(
+            "test-ack-ok",
+            &python,
+            vec![
+                "-u".to_string(),
+                "-c".to_string(),
+                ack_script("True"),
+            ],
+        );
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let mut stream = adapter.start().await.unwrap();
+        adapter
+            .send(&ack_user(), ChannelContent::Text("hello".to_string()))
+            .await
+            .expect("send_ack must confirm the send");
+        adapter.stop().await.unwrap();
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn test_send_without_capability_keeps_receipt_and_is_fast() {
+        // An adapter that never declared `send_acks` (telegram and
+        // every other pre-ack adapter) must keep the old contract:
+        // pipe-write receipt, no ack wait — and only a one-time WARN.
+        let python = match which_python() {
+            Some(p) => p,
+            None => return,
+        };
+        let script = r#"
+import sys, json
+print(json.dumps({'method': 'ready', 'params': {
+    'capabilities': [], 'account_id': 'old-bot'}}), flush=True)
+for line in sys.stdin:
+    cmd = json.loads(line)
+    if cmd.get('method') == 'shutdown':
+        sys.exit(0)
+"#;
+        let config = cfg(
+            "test-ack-nocap",
+            &python,
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        );
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let mut stream = adapter.start().await.unwrap();
+        let started = std::time::Instant::now();
+        adapter
+            .send(&ack_user(), ChannelContent::Text("hello".to_string()))
+            .await
+            .expect("no-capability send must keep the receipt contract");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "no-capability send must not wait for an ack"
+        );
+        adapter.stop().await.unwrap();
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn test_send_ack_timeout_falls_back_to_receipt() {
+        // The adapter declared `send_acks` but never answers: the
+        // send falls back to the pipe-write receipt after the
+        // configured timeout (WARN, not failure) — a slow-but-working
+        // adapter must never regress to a tool error.
+        let python = match which_python() {
+            Some(p) => p,
+            None => return,
+        };
+        let script = r#"
+import sys, json
+print(json.dumps({'method': 'ready', 'params': {
+    'capabilities': ['send_acks'], 'account_id': 'silent-bot'}}), flush=True)
+for line in sys.stdin:
+    cmd = json.loads(line)
+    if cmd.get('method') == 'shutdown':
+        sys.exit(0)
+"#;
+        let config = serde_json::from_value(serde_json::json!({
+            "name": "test-ack-timeout",
+            "command": python,
+            "args": ["-u", "-c", script],
+            "send_ack_timeout_secs": 1,
+        }))
+        .expect("SidecarChannelConfig with short ack timeout");
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let mut stream = adapter.start().await.unwrap();
+        let started = std::time::Instant::now();
+        adapter
+            .send(&ack_user(), ChannelContent::Text("hello".to_string()))
+            .await
+            .expect("ack timeout must fall back to the receipt, not fail");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_secs(1),
+            "must actually wait for the configured timeout"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "must not hang past the configured timeout"
+        );
+        adapter.stop().await.unwrap();
+        drop(stream);
     }
 }

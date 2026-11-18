@@ -360,7 +360,11 @@ class NextcloudAdapter(SidecarAdapter):
     # Talk REST adapter (Talk's typing indicator is a separate WebSocket
     # /signaling endpoint and not part of the OCS REST surface; mirrors
     # the Rust adapter's no-op `send_typing`).
-    capabilities: list = []
+    # send_acks: the daemon stamps every send with a correlation id
+    # and this adapter reports delivery outcomes (send_ack /
+    # send_failed) so the daemon's tool result reflects real
+    # delivery. Older daemons ignore the capability and the acks.
+    capabilities: list = ["send_acks"]
 
     SCHEMA = Schema(
         name="nextcloud",
@@ -1469,10 +1473,16 @@ class NextcloudAdapter(SidecarAdapter):
         path is loud (stderr + chat notice) — the old
         "(Unsupported content type)" placeholder is gone for good."""
         content = getattr(cmd, "content", None)
+        cmd_id = getattr(cmd, "id", None)
+
+        def _fail(reason: str) -> None:
+            # Every failure path funnels here: the daemon learns the
+            # send died (send_failed) AND the room gets its notice.
+            self.ack_send(cmd_id, error=reason)
+            self._media_failure(room_token, reply_to, reason)
+
         if not isinstance(content, dict):
-            self._media_failure(
-                room_token, reply_to, "malformed content",
-            )
+            _fail("malformed content")
             return
 
         if "File" in content:
@@ -1481,6 +1491,10 @@ class NextcloudAdapter(SidecarAdapter):
             log.warn(
                 "nextcloud outbound media by URL not implemented",
                 room_token=room_token,
+            )
+            self.ack_send(
+                cmd_id,
+                error="outbound media by URL is not implemented yet",
             )
             self._post_message(
                 room_token,
@@ -1492,21 +1506,20 @@ class NextcloudAdapter(SidecarAdapter):
 
         file_data = content.get("FileData")
         if not isinstance(file_data, dict):
-            self._media_failure(
-                room_token, reply_to, "unsupported content shape",
+            _fail(
+                "unsupported content shape",
             )
             return
 
         data = _coerce_file_data(file_data.get("data"))
         if data is None:
-            self._media_failure(
-                room_token, reply_to, "malformed byte array",
+            _fail(
+                "malformed byte array",
             )
             return
         if len(data) > MAX_UPLOAD_BYTES:
-            self._media_failure(
-                room_token, reply_to,
-                f"payload above {MAX_UPLOAD_BYTES}-byte upload limit",
+            _fail(
+            f"payload above {MAX_UPLOAD_BYTES}-byte upload limit",
             )
             return
         filename = _safe_filename(file_data.get("filename"))
@@ -1515,9 +1528,8 @@ class NextcloudAdapter(SidecarAdapter):
             mime = "application/octet-stream"
 
         if not self.own_user_id:
-            self._media_failure(
-                room_token, reply_to,
-                "own user id unknown (credential discovery failed)",
+            _fail(
+                                "own user id unknown (credential discovery failed)",
             )
             return
 
@@ -1532,9 +1544,8 @@ class NextcloudAdapter(SidecarAdapter):
             },
         )
         if put_status >= 300:
-            self._media_failure(
-                room_token, reply_to,
-                f"DAV PUT error {put_status}: "
+            _fail(
+            f"DAV PUT error {put_status}: "
                 f"{raw[:200].decode('utf-8', 'replace')}",
             )
             return
@@ -1542,9 +1553,8 @@ class NextcloudAdapter(SidecarAdapter):
             filename, resp_headers.get("oc-fileid"),
         )
         if numeric_file_id is None:
-            self._media_failure(
-                room_token, reply_to,
-                f"file id unresolvable: OC-FileId header "
+            _fail(
+            f"file id unresolvable: OC-FileId header "
                 f"{resp_headers.get('oc-fileid')!r}, DAV PROPFIND "
                 f"oc:fileid fallback failed",
             )
@@ -1597,9 +1607,8 @@ class NextcloudAdapter(SidecarAdapter):
             ),
         )
         if share_status >= 300:
-            self._media_failure(
-                room_token, reply_to,
-                f"share POST error {share_status}: "
+            _fail(
+            f"share POST error {share_status}: "
                 f"{raw[:200].decode('utf-8', 'replace')}",
             )
             return
@@ -1609,6 +1618,8 @@ class NextcloudAdapter(SidecarAdapter):
         # the share so it is visible in the room timeline.
         if caption:
             self._post_message(room_token, caption, reply_to)
+        # Upload + share (+ caption) all landed — ack delivery.
+        self.ack_send(cmd_id)
 
     async def on_send(self, cmd) -> None:
         # Phase 2: structured non-Text content is outbound media —
@@ -1670,6 +1681,9 @@ class NextcloudAdapter(SidecarAdapter):
                 None, self._post_message, room_token,
                 cmd.text or "", reply_to,
             )
+            # _post_message raises on any non-2xx, so reaching here
+            # means the message is on the platform — ack delivery.
+            self.ack_send(getattr(cmd, "id", None))
         else:
             await asyncio.get_event_loop().run_in_executor(
                 None, self._send_media, cmd, room_token, reply_to,

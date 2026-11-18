@@ -3291,6 +3291,13 @@ pub struct SidecarChannelConfig {
     /// Grace period (secs) for a clean exit on `stop()` before SIGKILL.
     #[serde(default = "default_sidecar_shutdown_grace_secs")]
     pub shutdown_grace_secs: u64,
+    /// How long the daemon waits for a `send_ack`/`send_failed` from a
+    /// sidecar that declared the `send_acks` capability before treating
+    /// the send as delivered on the pipe-write receipt alone (WARN, not
+    /// failure). Media uploads can be slow — 30s covers a large file
+    /// on a slow link.
+    #[serde(default = "default_sidecar_send_ack_timeout_secs")]
+    pub send_ack_timeout_secs: u64,
     /// Bounded inbound message buffer (also the backpressure point).
     #[serde(default = "default_sidecar_message_buffer")]
     pub message_buffer: usize,
@@ -3388,6 +3395,10 @@ fn default_sidecar_ready_timeout_secs() -> u64 {
 
 fn default_sidecar_shutdown_grace_secs() -> u64 {
     5
+}
+
+fn default_sidecar_send_ack_timeout_secs() -> u64 {
+    30
 }
 
 fn default_sidecar_message_buffer() -> usize {

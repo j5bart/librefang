@@ -137,9 +137,9 @@ def test_suppress_error_responses_is_true_in_ready_event():
     assert p.get("suppress_error_responses") is True
 
 
-def test_capabilities_empty():
+def test_capabilities_include_send_acks():
     a = _adapter()
-    assert a.capabilities == []
+    assert a.capabilities == ["send_acks"]
 
 
 def test_account_id_in_ready_event():
@@ -1017,12 +1017,13 @@ def test_post_message_non_2xx_surfaces(monkeypatch):
 
 class _StubCmd:
     def __init__(self, *, text=None, content=None, thread_id=None,
-                 user=None, channel_id=None):
+                 user=None, channel_id=None, id=None):
         self.text = text
         self.content = content
         self.thread_id = thread_id
         self.user = user or {}
         self.channel_id = channel_id
+        self.id = id
 
 
 def test_on_send_uses_platform_id_as_room(monkeypatch):
@@ -1902,7 +1903,7 @@ def _media_ok_ocs():
 
 
 def _file_data_cmd(data, filename="photo.png", mime="image/png",
-                   text=None, room="ROOM1"):
+                   text=None, room="ROOM1", cmd_id=None):
     content = {"FileData": {
         "data": data, "filename": filename, "mime_type": mime,
     }}
@@ -1910,6 +1911,7 @@ def _file_data_cmd(data, filename="photo.png", mime="image/png",
         text=text if text is not None else json.dumps(content),
         content=content,
         user={"platform_id": room},
+        id=cmd_id,
     )
 
 
@@ -2294,3 +2296,77 @@ def test_on_send_file_data_filename_sanitised(monkeypatch):
     meta = json.loads(form["metaData"])
     assert meta["name"] == "passwd.png"
     assert meta["path"] == "LibreFang/passwd.png"
+
+
+# ---- on_send: send-ack emission (P0 delivery confirmation) ---------------
+
+
+def _recording_sink(adapter):
+    recorded = []
+    adapter.set_ack_sink(lambda cmd_id, error: recorded.append((cmd_id, error)))
+    return recorded
+
+
+def test_on_send_text_success_acks(monkeypatch):
+    """A delivered text send must ack, so the daemon's tool result can
+    reflect real delivery instead of a pipe-write receipt."""
+    a = _adapter()
+    recorded = _recording_sink(a)
+    fake = _FakeUrlopen([(201, _media_ok_ocs())])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text="hi", user={"platform_id": "ROOM1"}, id="cmd-7",
+    )))
+    assert recorded == [("cmd-7", None)]
+
+
+def test_on_send_file_data_success_acks(monkeypatch):
+    """Happy-path media (DAV PUT + share) acks with no error."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    recorded = _recording_sink(a)
+    fake = _FakeUrlopen([
+        (201, b"", {"OC-FileId": "12345"}),
+        (201, _media_ok_ocs()),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_file_data_cmd(list(b"PNGDATA"), cmd_id="cmd-8")))
+    assert recorded == [("cmd-8", None)]
+
+
+def test_on_send_file_data_failure_send_fails(monkeypatch):
+    """A media send the adapter handled internally (chat notice posted)
+    still owes the daemon a send_failed — the old fire-and-forget
+    contract reported success for exactly this shape."""
+    a = _adapter()
+    recorded = _recording_sink(a)
+    fake = _FakeUrlopen([(201, _media_ok_ocs())])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text=None,
+        content={"FileData": {
+            "data": "not-a-list", "filename": "x.png",
+            "mime_type": "image/png",
+        }},
+        user={"platform_id": "ROOM1"},
+        id="cmd-9",
+    )))
+    assert recorded == [("cmd-9", "malformed byte array")]
+
+
+def test_ack_send_noop_without_sink(monkeypatch):
+    """Old daemons never install a sink; ack_send must be a silent
+    no-op so the adapter keeps working against them."""
+    a = _adapter()
+    fake = _FakeUrlopen([(201, _media_ok_ocs())])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text="hi", user={"platform_id": "ROOM1"}, id="cmd-10",
+    )))
+    # No sink installed, no crash, message still posted.
+    assert "/chat/ROOM1" in fake.calls[0]["url"]
+

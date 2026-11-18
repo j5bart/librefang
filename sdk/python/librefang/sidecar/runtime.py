@@ -138,6 +138,26 @@ class SidecarAdapter:
         if isinstance(cmd, Send):
             await self.on_send(cmd)
 
+    def set_ack_sink(self, sink) -> None:
+        """Installed by :func:`run` when the daemon requested send
+        acks (LIBREFANG_SIDECAR_SEND_ACKS) and this adapter declared
+        the ``send_acks`` capability. Adapters report per-send
+        delivery outcomes through :meth:`ack_send`; without a sink
+        (older daemons, or adapters that never opted in) ack_send is
+        a silent no-op, so the fire-and-forget contract is preserved.
+        """
+        self._ack_sink = sink
+
+    def ack_send(self, cmd_id, error=None) -> None:
+        """Report the delivery outcome for the send stamped
+        ``cmd_id``: ``error=None`` means delivered (send_ack),
+        otherwise the short failure reason (send_failed). No-op when
+        acks are off or the command carried no id — adapters call
+        this unconditionally and stay compatible with old daemons."""
+        sink = getattr(self, "_ack_sink", None)
+        if cmd_id and sink is not None:
+            sink(cmd_id, error)
+
     async def produce(self, emit: EmitFn) -> None:
         """Optional: pull inbound platform events and ``emit(event)``
         (build events with :mod:`librefang.sidecar.protocol`). Default:
@@ -209,6 +229,22 @@ async def run(
     re-announcing but the run continues — a pre-#5219 daemon that never
     sends ``ready_ack`` still gets the first ``ready`` and the adapter
     keeps serving without flooding stdout."""
+    # Send-ack wiring (P0 delivery confirmation): the daemon opts in
+    # via env, the adapter opts in via its capabilities list. Only
+    # when both hold does the runtime install the sink — an old
+    # daemon sees no new events, an old adapter sees no sink.
+    acks_enabled = (
+        bool(os.environ.get("LIBREFANG_SIDECAR_SEND_ACKS"))
+        and "send_acks" in (getattr(adapter, "capabilities", None) or [])
+    )
+    if acks_enabled:
+        adapter.set_ack_sink(
+            lambda cmd_id, error: emit(
+                protocol.send_ack(cmd_id) if error is None
+                else protocol.send_failed(cmd_id, error)))
+    else:
+        adapter.set_ack_sink(None)
+
     acked = asyncio.Event()
     stop = asyncio.Event()
     producer_error: Optional[BaseException] = None
@@ -289,6 +325,17 @@ async def run(
                     # is tracked in a follow-up; it needs a protocol
                     # change (Response.error field) that this hotfix
                     # doesn't ship.
+                    # P0 delivery confirmation: a send that raised
+                    # never reached the platform — tell the daemon so
+                    # its tool result can fail instead of reporting
+                    # the pipe-write receipt as delivery. (The
+                    # structured-error-response follow-up this
+                    # comment used to track.)
+                    if acks_enabled:
+                        failed_id = getattr(cmd, "id", None)
+                        if failed_id:
+                            emit(protocol.send_failed(
+                                failed_id, f"adapter raised: {e}"))
                     log.error(
                         "on_command failed",
                         error=str(e),

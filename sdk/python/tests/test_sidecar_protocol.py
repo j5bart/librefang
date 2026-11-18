@@ -296,3 +296,31 @@ def test_every_first_party_adapter_announces_the_protocol_version():
                 )
                 seen += 1
     assert seen >= 20, f"expected the full first-party adapter set, saw {seen}"
+
+
+# ---- send acks (P0 delivery confirmation) ---------------------------------
+
+
+def test_parse_send_reads_optional_command_id():
+    cmd = parse_command(json.dumps({
+        "method": "send",
+        "params": {"channel_id": "c", "text": "hi", "id": "cmd-42"},
+    }))
+    assert isinstance(cmd, Send)
+    assert cmd.id == "cmd-42"
+    # Old daemons never stamped an id; None must keep working.
+    cmd2 = parse_command(json.dumps({
+        "method": "send",
+        "params": {"channel_id": "c", "text": "hi"},
+    }))
+    assert cmd2.id is None
+
+
+def test_send_ack_and_send_failed_event_shapes():
+    assert protocol.send_ack("cmd-42") == {
+        "method": "send_ack", "params": {"id": "cmd-42"},
+    }
+    assert protocol.send_failed("cmd-42", "DAV PUT failed: 404") == {
+        "method": "send_failed",
+        "params": {"id": "cmd-42", "error": "DAV PUT failed: 404"},
+    }

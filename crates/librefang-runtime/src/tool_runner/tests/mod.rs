@@ -1748,6 +1748,10 @@ struct MirrorKernel {
     >,
     sent: SentLog,
     fail_append: bool,
+    /// When set, send_channel_file_data fails the way a sidecar
+    /// adapter does on a `send_failed` event — used to pin the tool
+    /// result contract for delivery failures (P0).
+    fail_sends: bool,
 }
 
 #[async_trait::async_trait]
@@ -1965,6 +1969,15 @@ impl ChannelSender for MirrorKernel {
         _thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        if self.fail_sends {
+            // Mirrors SidecarAdapter::send on a send_failed event:
+            // Err carries the adapter-facing reason, which the tool
+            // result must surface to the calling agent.
+            return Err(format!(
+                "send_failed: DAV PUT failed: 404 ({recipient} on {channel})"
+            )
+            .into());
+        }
         self.sent.lock().unwrap().push((
             channel.to_string(),
             recipient.to_string(),
@@ -2026,6 +2039,7 @@ async fn channel_send_mirror_renames_a_reserved_channel_before_deriving_the_sess
             appended: Arc::clone(&appended),
             sent: Arc::new(std::sync::Mutex::new(Vec::new())),
             fail_append: false,
+            fail_sends: false,
         });
 
         let input = serde_json::json!({
@@ -2092,6 +2106,7 @@ async fn test_channel_send_mirrors_to_channel_owner_session() {
         appended: Arc::clone(&appended),
         sent: Arc::new(std::sync::Mutex::new(Vec::new())),
         fail_append: false,
+            fail_sends: false,
     });
 
     let input = serde_json::json!({
@@ -2146,6 +2161,7 @@ async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
         appended: Arc::clone(&appended),
         sent: Arc::new(std::sync::Mutex::new(Vec::new())),
         fail_append: false,
+            fail_sends: false,
     });
 
     let input = serde_json::json!({
@@ -2188,7 +2204,8 @@ async fn test_channel_send_succeeds_even_when_mirror_fails() {
         owner_id: Some(owner),
         appended: Arc::clone(&appended),
         sent: Arc::new(std::sync::Mutex::new(Vec::new())),
-        fail_append: true, // simulates a save error
+        fail_append: true,
+            fail_sends: false, // simulates a save error
     });
 
     let input = serde_json::json!({
@@ -2245,6 +2262,7 @@ fn send_recording_kernel() -> (Arc<dyn KernelHandle>, SentLog) {
         appended: Arc::new(std::sync::Mutex::new(Vec::new())),
         sent: Arc::clone(&sent),
         fail_append: false,
+            fail_sends: false,
     });
     (kernel, sent)
 }
@@ -3151,3 +3169,51 @@ mod shell;
 mod skills;
 mod workflow;
 mod workspace;
+
+
+// ── channel_send: send_failed must surface in the tool result (P0) ──────
+
+#[tokio::test]
+async fn test_channel_send_file_path_errors_on_send_failed() {
+    // Delivery confirmation contract: when the underlying channel
+    // adapter reports a send_failed (the sidecar ack flow added in
+    // P0), the kernel propagates the Err and the tool result must be
+    // an error carrying the adapter's reason — never a success
+    // receipt for a send that never reached the platform.
+    let kernel = MirrorKernel {
+        owner_id: None,
+        appended: Arc::new(std::sync::Mutex::new(Vec::new())),
+        sent: SentLog::default(),
+        fail_append: false,
+        fail_sends: true,
+    };
+    let input = serde_json::json!({
+        "channel": "nextcloud",
+        "recipient": "c9j46i9v",
+        "file_path": "lobstertest/pipeline-test.jpg",
+        "message": "caption that must not mask the failure",
+    });
+    let result = tool_channel_send(&input, Some(&kernel), &Default::default())
+        .await
+        .expect("tool call must return a result envelope");
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content).expect("tool result is JSON");
+    assert!(
+        payload.get("error").is_some(),
+        "send_failed must surface as a tool error, got: {payload}"
+    );
+    let err_text = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        err_text.contains("send_failed"),
+        "error must name the send_failed outcome: {err_text}"
+    );
+    assert!(
+        err_text.contains("DAV PUT failed"),
+        "error must carry the adapter's reason: {err_text}"
+    );
+    assert!(
+        kernel.sent.lock().unwrap().is_empty(),
+        "the failed send must not be recorded as delivered"
+    );
+}
+

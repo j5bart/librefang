@@ -274,6 +274,25 @@ def error(msg: str) -> Dict[str, Any]:
     return {"method": "error", "params": {"message": msg}}
 
 
+def send_ack(cmd_id: str) -> Dict[str, Any]:
+    """Event: the adapter delivered the ``send`` stamped with
+    ``cmd_id`` to the platform. Only emitted by adapters that declare
+    the ``send_acks`` capability, and only when the daemon requested
+    acks (LIBREFANG_SIDECAR_SEND_ACKS) — the daemon correlates the
+    ack to its pending send and the calling tool's result reflects
+    real delivery instead of a pipe-write receipt."""
+    return {"method": "send_ack", "params": {"id": cmd_id}}
+
+
+def send_failed(cmd_id: str, error: str) -> Dict[str, Any]:
+    """Event: the send stamped with ``cmd_id`` failed to deliver.
+    Same gating as :func:`send_ack`; ``error`` is the adapter-facing
+    failure reason (kept short — it surfaces in the daemon's tool
+    result)."""
+    return {"method": "send_failed",
+            "params": {"id": cmd_id, "error": error}}
+
+
 def typing_event(user_id: str, user_name: str,
                  is_typing: bool) -> Dict[str, Any]:
     return {"method": "typing",
@@ -343,6 +362,12 @@ class Send:
     content: Optional[Dict[str, Any]]
     thread_id: Optional[str]
     user: Dict[str, Any]
+    #: Correlation id stamped by the daemon on every send. Adapters
+    #: that declare the ``send_acks`` capability echo it back in a
+    #: ``send_ack``/``send_failed`` event so the daemon's tool result
+    #: reflects real delivery; older daemons never set it and older
+    #: adapters ignore it.
+    id: Optional[str] = None
 
 
 @dataclass
@@ -454,7 +479,7 @@ def parse_command(line: str) -> Command:
     if method == "send":
         return Send(p.get("channel_id", ""), p.get("text", ""),
                     p.get("content"), p.get("thread_id"),
-                    p.get("user", {}))
+                    p.get("user", {}), p.get("id"))
     if method == "ready_ack":
         return ReadyAck()
     if method == "shutdown":
