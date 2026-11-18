@@ -1587,9 +1587,14 @@ class NextcloudAdapter(SidecarAdapter):
         # requires every metaData value to be a string — so the
         # body is application/x-www-form-urlencoded with
         # objectType/objectId plus metaData as a JSON string whose
-        # values are all stringified (size int → str). Talk
-        # re-resolves the rich object per viewer, so `path` is
-        # relative to the bot's files root with no leading slash.
+        # values are all stringified (size int → str). Observed
+        # live (2026-11-18): the composer does NOT re-resolve the
+        # rich object per viewer — it MERGES the supplied metaData
+        # into the stored card (params = supplied fields +
+        # server-added type/id/icon-url; omitted fields stay
+        # omitted), so every field a Talk client needs to render
+        # the card must be supplied here. `path` is relative to the
+        # bot's files root with no leading slash.
         meta_data = {
             "name": filename,
             "path": "/".join(
@@ -1597,6 +1602,14 @@ class NextcloudAdapter(SidecarAdapter):
             ),
             "size": str(len(data)),
             "mimetype": mime,
+            # Card-rendering fields: without `link` and
+            # `preview-available` clients cannot build the
+            # attachment UI and fall back to painting `name` as
+            # flat text (2026-11-18 live evidence). `link` is the
+            # /f/{id} viewer URL; the f-string stringifies the int
+            # id for the all-strings rich-object validator.
+            "link": f"{self.server_url}/index.php/f/{numeric_file_id}",
+            "preview-available": "yes",
         }
         if caption:
             meta_data["caption"] = caption

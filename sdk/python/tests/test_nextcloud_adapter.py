@@ -1921,7 +1921,10 @@ def test_on_send_file_data_uploads_then_shares(monkeypatch):
     response → OCS share POST, form-encoded per the OCS layer
     (objectType + objectId + metaData as a JSON string whose values
     are ALL strings — the rich-object validator rejects non-string
-    values). The daemon's JSON flattening of the content into `text`
+    values). The metaData must carry the renderable-card fields
+    (`link` + `preview-available`): the composer merges the supplied
+    fields and clients cannot build the attachment UI without them.
+    The daemon's JSON flattening of the content into `text`
     must NOT be posted as a caption."""
     a = _adapter()
     a.own_user_id = "librefang-bot"
@@ -1962,6 +1965,12 @@ def test_on_send_file_data_uploads_then_shares(monkeypatch):
         "path": "LibreFang/photo.png",
         "size": "7",
         "mimetype": "image/png",
+        # Renderable-card fields (2026-11-18 live evidence): the
+        # composer MERGES the supplied metaData into the stored rich
+        # object — omit these and Talk clients cannot build the
+        # attachment UI, painting `name` as flat text instead.
+        "link": "https://cloud.example.com/index.php/f/12345",
+        "preview-available": "yes",
     }
 
 
@@ -1984,7 +1993,14 @@ def test_on_send_file_data_caption_after_share(monkeypatch):
     assert len(fake.calls) == 3
     assert "/chat/ROOM1/share" in fake.calls[1]["url"]
     share_form = dict(urllib.parse.parse_qsl(fake.calls[1]["body_raw"]))
-    assert json.loads(share_form["metaData"])["caption"] == "look at this"
+    share_meta = json.loads(share_form["metaData"])
+    assert share_meta["caption"] == "look at this"
+    # The captioned send shares the composer, so the card must carry
+    # the renderable-card fields here too.
+    assert share_meta["link"] == (
+        "https://cloud.example.com/index.php/f/12345"
+    )
+    assert share_meta["preview-available"] == "yes"
     caption = fake.calls[2]
     assert "/chat/ROOM1" in caption["url"]
     assert "/share" not in caption["url"]
@@ -2088,10 +2104,13 @@ def test_on_send_file_data_oc_fileid_padded_instance_suffix(monkeypatch):
     )
     form = dict(urllib.parse.parse_qsl(share["body_raw"]))
     assert form["objectId"] == "2861982"
-    assert all(
-        isinstance(v, str)
-        for v in json.loads(form["metaData"]).values()
+    meta = json.loads(form["metaData"])
+    assert all(isinstance(v, str) for v in meta.values())
+    # The viewer link uses the same unpadded numeric id.
+    assert meta["link"] == (
+        "https://cloud.example.com/index.php/f/2861982"
     )
+    assert meta["preview-available"] == "yes"
 
 
 def test_on_send_file_data_oc_fileid_unparseable_propfind_fallback(monkeypatch):
