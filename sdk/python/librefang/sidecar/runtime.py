@@ -44,6 +44,7 @@ import json
 import os
 import sys
 import threading
+import time
 import traceback
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -412,16 +413,250 @@ def run_stdio_main(adapter_class):
     run_stdio(adapter_class())
 
 
+# ---------------------------------------------------------------------------
+# Byte-level stdin reading + reader watchdog
+#
+# The reader used to be ``for line in sys.stdin``, which hides every
+# byte inside TextIOWrapper's read-ahead. On 2026-11-18 a 314KB
+# FileData frame written atomically into the stdin pipe was consumed by
+# that buffer and never reached the command loop — no error, no log,
+# no dispatch. Reading at the byte level makes every buffered byte
+# observable, the max-line guard bounds a corrupt stream, and the
+# watchdog reports stalls loudly instead of silently.
+# ---------------------------------------------------------------------------
+
+#: Bytes fetched per read(2); a frame larger than this arrives across
+#: several reads, exactly as it arrives across several pipe writes.
+READ_CHUNK_BYTES = 65536
+
+#: Default cap on a single unterminated line. 64 MiB is far above the
+#: largest legitimate frame (a 44KB file serialises to ~314KB) but
+#: bounds a runaway or corrupt writer.
+DEFAULT_MAX_LINE_BYTES = 64 * 1024 * 1024
+
+#: Default time an unterminated partial line may sit in the reader
+#: buffer before the watchdog reports it.
+DEFAULT_READER_STALL_SECS = 30.0
+
+#: Default time a parsed line may sit in the command queue before the
+#: watchdog reports the dispatch loop as wedged.
+DEFAULT_QUEUE_STALL_SECS = 30.0
+
+
+def _env_int(name: str, default: int, override: Optional[int] = None) -> int:
+    if override is not None:
+        return override
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warn("ignoring invalid env override", env=name, value=raw)
+        return default
+    if value <= 0:
+        log.warn("ignoring non-positive env override", env=name, value=raw)
+        return default
+    return value
+
+
+def _env_float(name: str, default: float,
+               override: Optional[float] = None) -> float:
+    if override is not None:
+        return override
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warn("ignoring invalid env override", env=name, value=raw)
+        return default
+    if value <= 0:
+        log.warn("ignoring non-positive env override", env=name, value=raw)
+        return default
+    return value
+
+
+class _ReaderProgress:
+    """Bytes currently buffered without a newline, and since when.
+
+    Written only by the reader thread and read only by the watchdog
+    thread; single-attribute writes are atomic under the GIL.
+    """
+
+    def __init__(self) -> None:
+        self.partial_bytes = 0
+        self.partial_since: Optional[float] = None
+        self.last_report: Optional[float] = None
+
+    def observe(self, buffered: int) -> None:
+        now = time.monotonic()
+        if buffered > 0:
+            if self.partial_since is None:
+                self.partial_since = now
+        else:
+            self.partial_since = None
+        self.partial_bytes = buffered
+
+
+def _stdin_read_fn() -> Callable[[], bytes]:
+    """Byte-level reader for the real stdin.
+
+    The pump must own every byte between the pipe and the command
+    loop, so it reads the file descriptor directly instead of going
+    through TextIOWrapper's read-ahead — the layer where a partial
+    frame could previously sit, unobservable by anyone.
+    """
+    try:
+        fd = sys.stdin.fileno()
+    except OSError:
+        raise  # transport-level failure: surface it verbatim
+    except Exception as e:  # noqa: BLE001
+        raise OSError("stdin is not a real file descriptor; "
+                      "byte-level reading is unavailable") from e
+    return lambda: os.read(fd, READ_CHUNK_BYTES)
+
+
+def _pump_stdin_lines(read_fn: Callable[[], bytes],
+                      put_line: Callable[[str], None], *,
+                      max_line_bytes: int,
+                      progress: Optional[_ReaderProgress] = None) -> None:
+    """Read stdin byte-by-byte and hand complete lines to ``put_line``.
+
+    Guarantees the old ``for line in sys.stdin`` loop did not make:
+
+    * a line larger than any pipe buffer is reassembled byte-exactly
+      from however many reads it arrives in;
+    * an unterminated line that exceeds ``max_line_bytes`` is dropped
+      with a loud log and the stream resynced at the next newline;
+    * an undecodable line is dropped loudly instead of killing the
+      reader;
+    * EOF with a partial line is reported instead of silently
+      discarding the truncated frame.
+    """
+    buf = bytearray()
+    resyncing = False
+    while True:
+        chunk = read_fn()
+        if not chunk:
+            break
+        buf += chunk
+        while True:
+            nl = buf.find(b"\n")
+            if nl < 0:
+                break
+            raw = bytes(buf[:nl])
+            del buf[:nl + 1]
+            if resyncing:
+                # Tail of a dropped over-long line: skip through the
+                # newline that terminated it.
+                resyncing = False
+                continue
+            try:
+                line = raw.decode("utf-8")
+            except UnicodeDecodeError as e:
+                log.error("reader: dropping undecodable stdin line",
+                          error=str(e), line_bytes=len(raw))
+                continue
+            put_line(line)
+        if progress is not None:
+            progress.observe(len(buf))
+        if buf and not resyncing and len(buf) > max_line_bytes:
+            log.error("reader: stdin line exceeded max_line_bytes; dropping "
+                      "the buffered bytes and resyncing at the next newline",
+                      buffered_bytes=len(buf), max_line_bytes=max_line_bytes)
+            resyncing = True
+            buf.clear()
+            if progress is not None:
+                progress.observe(0)
+    if buf:
+        log.error("reader: EOF with a partial line — the final frame was "
+                  "truncated", buffered_bytes=len(buf))
+
+
+def _start_watchdog(progress: _ReaderProgress, *,
+                    reader_stall_secs: float,
+                    queue: Optional["asyncio.Queue[Any]"],
+                    queue_stall_secs: float,
+                    stop: threading.Event,
+                    check_interval: float = 1.0) -> threading.Thread:
+    """Watch for the two silent-wedge shapes and report them loudly.
+
+    * bytes buffered with no newline for ``reader_stall_secs`` — the
+      writer died mid-frame (the 2026-11-18 18:40Z shape);
+    * parsed lines queued but not dispatched for
+      ``queue_stall_secs`` — the command loop is wedged.
+    """
+
+    def _watch() -> None:
+        queue_nonempty_since: Optional[float] = None
+        while not stop.is_set():
+            now = time.monotonic()
+            since = progress.partial_since
+            if progress.partial_bytes > 0 and since is not None:
+                age = now - since
+                last = progress.last_report
+                if age >= reader_stall_secs and (
+                        last is None or now - last >= reader_stall_secs):
+                    progress.last_report = now
+                    log.error("reader: stdin bytes buffered with no newline "
+                              "— the writer may have died mid-frame",
+                              buffered_bytes=progress.partial_bytes,
+                              stalled_secs=round(age, 1),
+                              hint="the daemon-side write did not complete; "
+                                   "a partial line cannot be dispatched")
+            if queue is not None:
+                qsize = queue.qsize()
+                if qsize == 0:
+                    queue_nonempty_since = None
+                elif queue_nonempty_since is None:
+                    queue_nonempty_since = now
+                elif now - queue_nonempty_since >= queue_stall_secs:
+                    log.error("reader: command lines queued but not "
+                              "dispatched — the command loop may be wedged",
+                              queued=qsize,
+                              stalled_secs=round(
+                                  now - queue_nonempty_since, 1))
+                    # Re-arm so the backlog is reported at most once
+                    # per interval, not once per check.
+                    queue_nonempty_since = now
+            stop.wait(check_interval)
+
+    t = threading.Thread(target=_watch, daemon=True,
+                         name="sidecar-reader-watchdog")
+    t.start()
+    return t
+
+
 async def _run_stdio(adapter: SidecarAdapter, *,
                      ready_interval: float,
-                     ready_max_attempts: int) -> None:
+                     ready_max_attempts: int,
+                     max_line_bytes: Optional[int] = None,
+                     reader_stall_secs: Optional[float] = None,
+                     queue_stall_secs: Optional[float] = None) -> None:
     loop = asyncio.get_event_loop()
     queue: "asyncio.Queue[Any]" = asyncio.Queue()
 
+    max_line_bytes = _env_int("LIBREFANG_SIDECAR_MAX_LINE_BYTES",
+                              DEFAULT_MAX_LINE_BYTES, max_line_bytes)
+    reader_stall_secs = _env_float("LIBREFANG_SIDECAR_READER_STALL_SECS",
+                                    DEFAULT_READER_STALL_SECS,
+                                    reader_stall_secs)
+    queue_stall_secs = _env_float("LIBREFANG_SIDECAR_QUEUE_STALL_SECS",
+                                  DEFAULT_QUEUE_STALL_SECS,
+                                  queue_stall_secs)
+
+    progress = _ReaderProgress()
+
     def _reader_thread() -> None:
         try:
-            for line in sys.stdin:
-                loop.call_soon_threadsafe(queue.put_nowait, line)
+            read_fn = _stdin_read_fn()
+            put_line = lambda line: loop.call_soon_threadsafe(  # noqa: E731
+                queue.put_nowait, line)
+            _pump_stdin_lines(read_fn, put_line,
+                              max_line_bytes=max_line_bytes,
+                              progress=progress)
         except Exception as e:  # noqa: BLE001
             loop.call_soon_threadsafe(
                 queue.put_nowait, _ReaderThreadFailure(e),
@@ -429,7 +664,15 @@ async def _run_stdio(adapter: SidecarAdapter, *,
         else:
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
-    threading.Thread(target=_reader_thread, daemon=True).start()
+    threading.Thread(target=_reader_thread, daemon=True,
+                     name="sidecar-stdin-reader").start()
+
+    watchdog_stop = threading.Event()
+    _start_watchdog(progress,
+                    reader_stall_secs=reader_stall_secs,
+                    queue=queue,
+                    queue_stall_secs=queue_stall_secs,
+                    stop=watchdog_stop)
 
     async def line_source() -> Optional[str]:
         item = await queue.get()
@@ -445,6 +688,9 @@ async def _run_stdio(adapter: SidecarAdapter, *,
             sys.stdout.write(data)
             sys.stdout.flush()
 
-    await run(adapter, line_source=line_source, emit=emit,
-              ready_interval=ready_interval,
-              ready_max_attempts=ready_max_attempts)
+    try:
+        await run(adapter, line_source=line_source, emit=emit,
+                  ready_interval=ready_interval,
+                  ready_max_attempts=ready_max_attempts)
+    finally:
+        watchdog_stop.set()

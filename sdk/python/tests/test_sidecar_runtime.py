@@ -7,6 +7,8 @@ a queue feeds stdin lines, a list captures emitted events.
 import asyncio
 import io
 import json
+import threading
+import time
 
 import pytest
 
@@ -330,10 +332,9 @@ async def test_stdio_reader_thread_failure_reaches_async_reader(monkeypatch):
     from librefang.sidecar.runtime import _run_stdio
 
     class BrokenStdin:
-        def __iter__(self):
-            return self
-
-        def __next__(self):
+        # The byte-level reader reaches the transport through fileno();
+        # a transport that cannot even provide one fails right there.
+        def fileno(self):
             raise OSError("stdin device failed")
 
     adapter = RecordingAdapter()
@@ -375,3 +376,177 @@ def test_run_stdio_exits_nonzero_after_producer_crash(monkeypatch):
     run_stdio(RecordingAdapter(), ready_interval=0.01, ready_max_attempts=1)
 
     assert exits == [1]
+
+
+# ---------------------------------------------------------------------------
+# Byte-level stdin pump + reader watchdog (the silent-loss hardening)
+#
+# The 2026-11-18 18:40Z incident: a 314KB FileData frame was written
+# atomically into the sidecar's stdin pipe, the bytes were consumed by
+# the `for line in sys.stdin` reader thread, and the line was never
+# delivered to the command loop — no error, no log, no dispatch. The
+# TextIOWrapper read-ahead owned those bytes and nothing observed them.
+# The pump below reads at the byte level so every buffered byte is
+# accounted for, guards against unbounded partial lines, and a
+# watchdog reports stalls loudly instead of silently.
+# ---------------------------------------------------------------------------
+
+
+class _ChunkedStdin:
+    """read_fn stub: yields the given byte chunks, then EOF (b"")."""
+
+    def __init__(self, *chunks: bytes):
+        self._chunks = list(chunks)
+
+    def __call__(self) -> bytes:
+        if self._chunks:
+            return self._chunks.pop(0)
+        return b""
+
+
+def _pump(*chunks, max_line_bytes=1024 * 1024, progress=None):
+    from librefang.sidecar.runtime import _pump_stdin_lines
+
+    # A lone bytes argument is one chunk, not an iterable of ints.
+    if len(chunks) == 1 and isinstance(chunks[0], (bytes, bytearray)):
+        chunks = (bytes(chunks[0]),)
+    lines = []
+    _pump_stdin_lines(_ChunkedStdin(*chunks), lines.append,
+                      max_line_bytes=max_line_bytes, progress=progress)
+    return lines
+
+
+async def test_pump_reassembles_line_split_across_reads():
+    # A frame far larger than any pipe buffer arrives in many small
+    # reads; the pump must reassemble it byte-exactly. In-process mirror
+    # of the >64KB real-pipe e2e in test_sidecar_stdio_e2e.py.
+    payload = '{"method":"send","params":{"text":"' + "x" * 200000 + '"}}'
+    chunks = [payload[i:i + 7].encode() for i in range(0, len(payload), 7)]
+    chunks.append(b"\n")
+    lines = _pump(*chunks)
+    assert lines == [payload]
+
+
+async def test_pump_splits_multiple_lines_in_one_chunk():
+    # Several frames arriving in one read (or one write) must all be
+    # delivered; a blank line is passed through as "" for run() to skip.
+    lines = _pump(b'{"a":1}\n\n{"b":2}\n')
+    assert lines == ['{"a":1}', '', '{"b":2}']
+
+
+async def test_pump_drops_undecodable_line_and_continues(capsys):
+    # Old behaviour: a bad byte raised UnicodeDecodeError inside the
+    # `for line in sys.stdin` iterator and took the whole sidecar down.
+    # Now the corrupt line is dropped loudly and service continues.
+    lines = _pump(b'{"a":"\xff\xfe"}\n{"ok":1}\n')
+    assert lines == ['{"ok":1}']
+    assert "dropping undecodable stdin line" in capsys.readouterr().err
+
+
+async def test_pump_overlong_line_dropped_and_resyncs(capsys):
+    # max_line_bytes=64: the 100-byte partial (no newline) trips the
+    # guard; everything up to the NEXT newline is dropped as the tail
+    # of the corrupt line; service resumes at the following line.
+    lines = _pump(b"x" * 100, b"tail-of-corrupt-line\n", b'{"ok":1}\n',
+                  max_line_bytes=64)
+    assert lines == ['{"ok":1}']
+    err = capsys.readouterr().err
+    assert "exceeded max_line_bytes" in err
+    assert "resyncing" in err
+
+
+async def test_pump_reports_eof_with_partial_line(capsys):
+    # A truncated final frame (writer died mid-write) must not vanish
+    # silently at EOF the way it did under `for line in sys.stdin`.
+    lines = _pump(b'{"method":"send","params":{"text"')
+    assert lines == []
+    err = capsys.readouterr().err
+    assert "partial line" in err
+    assert "truncated" in err
+
+
+async def test_pump_progress_tracks_partial_bytes():
+    from librefang.sidecar.runtime import _ReaderProgress
+
+    progress = _ReaderProgress()
+    lines = _pump(b'{"a":', b'1}\n', progress=progress)
+    assert lines == ['{"a":1}']
+    assert progress.partial_bytes == 0
+    assert progress.partial_since is None
+
+    progress2 = _ReaderProgress()
+    _pump(b'{"partial":', progress=progress2)
+    assert progress2.partial_bytes == len(b'{"partial":')
+    assert progress2.partial_since is not None
+
+
+async def test_watchdog_logs_partial_line_stall(capsys):
+    from librefang.sidecar.runtime import _ReaderProgress, _start_watchdog
+
+    progress = _ReaderProgress()
+    progress.observe(314021)  # the incident frame size
+    progress.partial_since = time.monotonic() - 2.0  # stalled 2s already
+
+    stop = threading.Event()
+    t = _start_watchdog(progress, reader_stall_secs=1.0, queue=None,
+                        queue_stall_secs=30.0, check_interval=0.05,
+                        stop=stop)
+    try:
+        deadline = time.monotonic() + 2.0
+        err = ""
+        while time.monotonic() < deadline:
+            err += capsys.readouterr().err
+            if "no newline" in err:
+                break
+            await asyncio.sleep(0.05)
+        assert "no newline" in err, f"watchdog never reported: {err!r}"
+        assert "314021" in err
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
+
+
+async def test_watchdog_logs_queue_backlog(capsys):
+    from librefang.sidecar.runtime import _ReaderProgress, _start_watchdog
+
+    progress = _ReaderProgress()
+    q: asyncio.Queue = asyncio.Queue()
+    q.put_nowait('{"one":1}')
+    q.put_nowait('{"two":2}')
+
+    stop = threading.Event()
+    t = _start_watchdog(progress, reader_stall_secs=30.0, queue=q,
+                        queue_stall_secs=0.2, check_interval=0.05,
+                        stop=stop)
+    try:
+        deadline = time.monotonic() + 2.0
+        err = ""
+        while time.monotonic() < deadline:
+            err += capsys.readouterr().err
+            if "queued but not dispatched" in err:
+                break
+            await asyncio.sleep(0.05)
+        assert "queued but not dispatched" in err, f"never reported: {err!r}"
+        assert '"queued": 2' in err
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
+
+
+async def test_watchdog_quiet_when_progress_is_healthy(capsys):
+    from librefang.sidecar.runtime import _ReaderProgress, _start_watchdog
+
+    progress = _ReaderProgress()
+    q: asyncio.Queue = asyncio.Queue()
+    stop = threading.Event()
+    t = _start_watchdog(progress, reader_stall_secs=0.1, queue=q,
+                        queue_stall_secs=0.1, check_interval=0.05,
+                        stop=stop)
+    try:
+        await asyncio.sleep(0.3)
+        err = capsys.readouterr().err
+        assert "no newline" not in err
+        assert "queued but not dispatched" not in err
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
