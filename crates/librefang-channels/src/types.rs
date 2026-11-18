@@ -237,6 +237,13 @@ pub enum ChannelContent {
         data: Vec<u8>,
         filename: String,
         mime_type: String,
+        /// Optional caption the sender asked for (the `channel_send`
+        /// tool's `message` input). Adapters that support captions
+        /// deliver it alongside the file (e.g. Talk's share
+        /// metaData); older adapters ignore the extra field.
+        /// Wire-additive per the sidecar protocol-version policy.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
     },
     Voice {
         url: String,

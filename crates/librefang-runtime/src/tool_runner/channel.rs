@@ -620,6 +620,18 @@ pub(super) async fn tool_channel_send(
     }
 
     if let Some(raw_path) = file_path {
+        // P2: the caption was silently dropped here — the branch never
+        // read `message`, so a file_path send with a caption lost it
+        // even on success. Read it exactly like the file_url branch
+        // (taint-checked) and hand it to the kernel so adapters that
+        // support captions deliver it with the file card.
+        let caption = input["message"].as_str().filter(|s| !s.is_empty());
+        if let Some(c) = caption {
+            if let Some(violation) = check_taint_outbound_text(c, &TaintSink::agent_message()) {
+                return Err(violation);
+            }
+        }
+
         let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
 
         let meta = tokio::fs::metadata(&resolved)
@@ -692,6 +704,7 @@ pub(super) async fn tool_channel_send(
                 bytes::Bytes::from(data),
                 &filename,
                 mime_type,
+                caption,
                 thread_id,
                 send_account_id,
             )

@@ -1752,6 +1752,10 @@ struct MirrorKernel {
     /// adapter does on a `send_failed` event — used to pin the tool
     /// result contract for delivery failures (P0).
     fail_sends: bool,
+    /// Captions handed to send_channel_file_data, in call order —
+    /// pins that the file_path branch passes the tool's `message`
+    /// through instead of silently dropping it (P2).
+    sent_captions: Arc<std::sync::Mutex<Vec<Option<String>>>>,
 }
 
 #[async_trait::async_trait]
@@ -1966,9 +1970,14 @@ impl ChannelSender for MirrorKernel {
         _data: bytes::Bytes,
         _filename: &str,
         _mime_type: &str,
+        caption: Option<&str>,
         _thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+        self.sent_captions
+            .lock()
+            .unwrap()
+            .push(caption.map(str::to_string));
         if self.fail_sends {
             // Mirrors SidecarAdapter::send on a send_failed event:
             // Err carries the adapter-facing reason, which the tool
@@ -2040,6 +2049,7 @@ async fn channel_send_mirror_renames_a_reserved_channel_before_deriving_the_sess
             sent: Arc::new(std::sync::Mutex::new(Vec::new())),
             fail_append: false,
             fail_sends: false,
+            sent_captions: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
 
         let input = serde_json::json!({
@@ -2107,6 +2117,7 @@ async fn test_channel_send_mirrors_to_channel_owner_session() {
         sent: Arc::new(std::sync::Mutex::new(Vec::new())),
         fail_append: false,
             fail_sends: false,
+            sent_captions: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
 
     let input = serde_json::json!({
@@ -2162,6 +2173,7 @@ async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
         sent: Arc::new(std::sync::Mutex::new(Vec::new())),
         fail_append: false,
             fail_sends: false,
+            sent_captions: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
 
     let input = serde_json::json!({
@@ -2205,7 +2217,8 @@ async fn test_channel_send_succeeds_even_when_mirror_fails() {
         appended: Arc::clone(&appended),
         sent: Arc::new(std::sync::Mutex::new(Vec::new())),
         fail_append: true,
-            fail_sends: false, // simulates a save error
+            fail_sends: false,
+            sent_captions: Arc::new(std::sync::Mutex::new(Vec::new())), // simulates a save error
     });
 
     let input = serde_json::json!({
@@ -2263,6 +2276,7 @@ fn send_recording_kernel() -> (Arc<dyn KernelHandle>, SentLog) {
         sent: Arc::clone(&sent),
         fail_append: false,
             fail_sends: false,
+            sent_captions: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
     (kernel, sent)
 }
@@ -3186,6 +3200,7 @@ async fn test_channel_send_file_path_errors_on_send_failed() {
         sent: SentLog::default(),
         fail_append: false,
         fail_sends: true,
+        sent_captions: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
     let input = serde_json::json!({
         "channel": "nextcloud",
@@ -3217,3 +3232,40 @@ async fn test_channel_send_file_path_errors_on_send_failed() {
     );
 }
 
+
+#[tokio::test]
+async fn test_channel_send_file_path_passes_caption_through() {
+    // P2 regression: the file_path branch never read `message`, so a
+    // captioned file send silently lost the caption even on success.
+    // It must now reach the kernel's send_channel_file_data exactly
+    // like the file_url branch delivers its caption.
+    let kernel = MirrorKernel {
+        owner_id: None,
+        appended: Arc::new(std::sync::Mutex::new(Vec::new())),
+        sent: SentLog::default(),
+        fail_append: false,
+        fail_sends: false,
+        sent_captions: Arc::new(std::sync::Mutex::new(Vec::new())),
+    };
+    let input = serde_json::json!({
+        "channel": "nextcloud",
+        "recipient": "c9j46i9v",
+        "file_path": "lobstertest/pipeline-test.jpg",
+        "message": "Phase 2 live-fire: pipeline-test.jpg",
+    });
+    let result = tool_channel_send(&input, Some(&kernel), &Default::default())
+        .await
+        .expect("tool call must return a result envelope");
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content).expect("tool result is JSON");
+    assert!(
+        payload.get("error").is_none(),
+        "captioned file send must succeed, got: {payload}"
+    );
+    let captions = kernel.sent_captions.lock().unwrap().clone();
+    assert_eq!(
+        captions,
+        vec![Some("Phase 2 live-fire: pipeline-test.jpg".to_string())],
+        "the caption must reach the kernel, not vanish"
+    );
+}

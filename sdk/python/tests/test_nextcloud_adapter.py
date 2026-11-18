@@ -2370,3 +2370,34 @@ def test_ack_send_noop_without_sink(monkeypatch):
     # No sink installed, no crash, message still posted.
     assert "/chat/ROOM1" in fake.calls[0]["url"]
 
+
+def test_on_send_file_data_content_caption_rides_in_share(monkeypatch):
+    """P2: the daemon stamps the tool's `message` caption inside the
+    FileData content; it must ride in the share's metaData (and the
+    caption message) exactly like the legacy text-carried caption —
+    the file_path tool branch used to drop it silently."""
+    a = _adapter()
+    a.own_user_id = "librefang-bot"
+    fake = _FakeUrlopen([
+        (201, b"", {"OC-FileId": "12345"}),
+        (201, _media_ok_ocs()),
+        (201, _media_ok_ocs()),
+    ])
+    monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
+    content = {"FileData": {
+        "data": list(b"PNGDATA"), "filename": "photo.png",
+        "mime_type": "image/png", "caption": "Phase 2 live-fire",
+    }}
+    import asyncio as _asyncio
+    _asyncio.run(a.on_send(_StubCmd(
+        text=json.dumps(content), content=content,
+        user={"platform_id": "ROOM1"},
+    )))
+    assert len(fake.calls) == 3
+    share_form = dict(urllib.parse.parse_qsl(fake.calls[1]["body_raw"]))
+    assert json.loads(share_form["metaData"])["caption"] == (
+        "Phase 2 live-fire"
+    )
+    caption = fake.calls[2]
+    assert "/chat/ROOM1" in caption["url"]
+    assert "/share" not in caption["url"]

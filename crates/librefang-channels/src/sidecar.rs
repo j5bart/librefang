@@ -3462,6 +3462,7 @@ mod tests {
                 data: vec![1, 2, 3, 4],
                 filename: "b.bin".to_string(),
                 mime_type: "application/octet-stream".to_string(),
+                caption: None,
             },
             ChannelContent::Voice {
                 url: "https://x/v.ogg".to_string(),

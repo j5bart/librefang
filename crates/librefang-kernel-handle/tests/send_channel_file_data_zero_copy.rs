@@ -219,6 +219,7 @@ impl ChannelSender for CapturingFileKernel {
         data: Bytes,
         _filename: &str,
         _mime_type: &str,
+        _caption: Option<&str>,
         _thread_id: Option<&str>,
         _account_id: Option<&str>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {

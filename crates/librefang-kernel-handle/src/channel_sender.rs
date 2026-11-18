@@ -48,6 +48,9 @@ pub trait ChannelSender: Send + Sync {
 
     /// Send a local file (raw bytes) to a user on a named channel adapter.
     /// Used by the `channel_send` tool when `file_path` is provided.
+    /// `caption` is optional text delivered alongside the file (the
+    /// tool's `message` input) — adapters that support captions carry
+    /// it with the file card.
     /// When `thread_id` is provided, the file is sent as a thread reply.
     /// When `account_id` is provided, routes through the specific configured bot with that ID.
     ///
@@ -64,11 +67,13 @@ pub trait ChannelSender: Send + Sync {
         data: bytes::Bytes,
         filename: &str,
         mime_type: &str,
+        caption: Option<&str>,
         thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<String, KernelOpError> {
         let _ = (
-            channel, recipient, data, filename, mime_type, thread_id, account_id,
+            channel, recipient, data, filename, mime_type, caption, thread_id,
+            account_id,
         );
         Err(KernelOpError::unavailable("Channel file data send"))
     }

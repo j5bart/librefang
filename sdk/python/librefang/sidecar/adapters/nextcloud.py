@@ -1560,19 +1560,26 @@ class NextcloudAdapter(SidecarAdapter):
             )
             return
 
-        # 2) Caption resolution: the daemon flattens a non-Text
-        # send's `text` to the JSON serialization of the content
-        # object itself, so a text that does NOT round-trip to the
-        # content is a real caption. Resolved BEFORE the share so
-        # it can ride in the share's metaData.
-        caption = getattr(cmd, "text", None)
-        if caption:
-            try:
-                flattened = json.loads(caption) == content
-            except (ValueError, TypeError):
-                flattened = False
-            if flattened:
-                caption = None
+        # 2) Caption resolution: P2 sends carry the caption inside the
+        # FileData content (the daemon stamps it from the tool's
+        # `message` input); legacy sends carry it as a `text` that
+        # does not round-trip to the content (the daemon flattens a
+        # non-Text send's `text` to the JSON serialization of the
+        # content itself). Resolved BEFORE the share so it can ride
+        # in the share's metaData.
+        caption = None
+        content_caption = file_data.get("caption")
+        if isinstance(content_caption, str) and content_caption.strip():
+            caption = content_caption
+        if caption is None:
+            caption = getattr(cmd, "text", None)
+            if caption:
+                try:
+                    flattened = json.loads(caption) == content
+                except (ValueError, TypeError):
+                    flattened = False
+                if flattened:
+                    caption = None
 
         # 3) Share the uploaded file into the room. The OCS layer
         # binds only form-encoded params (a JSON body is silently

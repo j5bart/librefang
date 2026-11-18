@@ -284,6 +284,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         data: bytes::Bytes,
         filename: &str,
         mime_type: &str,
+        caption: Option<&str>,
         thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<String, kernel_handle::KernelOpError> {
@@ -305,6 +306,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             data: Vec::from(data),
             filename: filename.to_string(),
             mime_type: mime_type.to_string(),
+            caption: caption.map(str::to_string),
         };
 
         if let Some(tid) = thread_id {
